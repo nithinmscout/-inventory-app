@@ -1,5 +1,4 @@
 
-
 # =============================================================================
 # app.py  —  Multi-Tenant Inventory Management System
 # Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
@@ -1484,50 +1483,183 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
             _location_card(col, loc, loc_items, loc_units)
         st.write("")
 
-    # ── Spatial Treemap — Digital Twin ────────────────────────────────────
+    # ── Spatial Overview — Digital Twin ──────────────────────────────────
     if not df.empty:
         st.divider()
-        st.markdown("**🗺️ Spatial Overview — Digital Twin**")
-        st.caption("Block size = quantity. Click a room to zoom into its storage units.")
+
+        hdr_col, toggle_col = st.columns([3, 2])
+        with hdr_col:
+            st.markdown("**🗺️ Spatial Overview — Digital Twin**")
+            st.caption("Inner ring = rooms · Outer ring = storage units · Sized by selected metric.")
+        with toggle_col:
+            view_metric = st.radio(
+                "Size by", ["Item Count", "Est. Value (£)"],
+                horizontal=True, key="spatial_metric",
+            )
 
         loc_lookup  = (
-            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+            {r["id"]: r["name"] for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+        loc_icon    = (
+            {r["id"]: r.get("icon","📦") for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+        loc_color_hex = (
+            {r["id"]: r.get("color","#e0f2fe") for r in locations_df.to_dict("records")}
             if not locations_df.empty else {}
         )
         unit_lookup = (
-            {r["id"]: f"{r['icon']} {r['name']}" for r in units_df.to_dict("records")}
+            {r["id"]: r["name"] for r in units_df.to_dict("records")}
             if not units_df.empty else {}
         )
 
-        tree_df = df[["item_name", "quantity", "location_id", "unit_id", "category"]].copy()
-        tree_df["Room"] = tree_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
-        tree_df["Unit"] = tree_df["unit_id"].map(unit_lookup).fillna("— In Room —")
-        tree_df["quantity"] = pd.to_numeric(tree_df["quantity"], errors="coerce").fillna(0)
-        tree_df = tree_df[tree_df["quantity"] > 0]
+        tree_df = df[["item_name", "quantity", "estimated_value",
+                       "location_id", "unit_id", "category"]].copy()
+        tree_df["quantity"]        = pd.to_numeric(tree_df["quantity"], errors="coerce").fillna(0)
+        tree_df["estimated_value"] = pd.to_numeric(tree_df["estimated_value"], errors="coerce").fillna(0)
+        tree_df["Room"]      = tree_df["location_id"].map(loc_lookup).fillna("Unassigned")
+        tree_df["RoomIcon"]  = tree_df["location_id"].map(loc_icon).fillna("📦")
+        tree_df["Unit"]      = tree_df["unit_id"].map(unit_lookup).fillna("In Room")
+        tree_df["RoomLabel"] = tree_df["RoomIcon"] + " " + tree_df["Room"]
+        tree_df["UnitLabel"] = tree_df["Unit"]
+        tree_df              = tree_df[tree_df["quantity"] > 0]
 
-        if not tree_df.empty:
-            fig_tree = px.treemap(
-                tree_df,
-                path=[px.Constant("🏠 Home"), "Room", "Unit", "item_name"],
-                values="quantity",
-                color="category",
-                color_discrete_sequence=px.colors.qualitative.Set2,
-                hover_data={"quantity": True, "category": True},
-                labels={"item_name": "Item", "quantity": "Qty"},
-            )
-            fig_tree.update_traces(
-                root_color="rgba(0,0,0,0)",
-                texttemplate="<b>%{label}</b><br>%{value:.0f}",
-                hovertemplate="<b>%{label}</b><br>Qty: %{value:.0f}<extra></extra>",
-            )
-            fig_tree.update_layout(
-                height=480,
-                margin=dict(t=30, b=10, l=10, r=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_tree, use_container_width=True)
-        else:
+        value_col = "quantity" if view_metric == "Item Count" else "estimated_value"
+        tree_df   = tree_df[tree_df[value_col] > 0]
+
+        if tree_df.empty:
             st.info("Add items with quantity > 0 to see the spatial overview.")
+        else:
+            col_sun, col_bar = st.columns([3, 2])
+
+            # ── Left: Sunburst ────────────────────────────────────────────
+            with col_sun:
+                import plotly.graph_objects as go
+
+                # Build hierarchy: root → Room → Unit → item
+                labels, parents, values, custom_text, marker_colors = [], [], [], [], []
+
+                ROOM_PALETTE = [
+                    "#14b8a6","#3b82f6","#a855f7","#f59e0b",
+                    "#ec4899","#22c55e","#f97316","#06b6d4",
+                ]
+                room_names  = tree_df["RoomLabel"].unique().tolist()
+                room_colour = {r: ROOM_PALETTE[i % len(ROOM_PALETTE)]
+                               for i, r in enumerate(room_names)}
+
+                # Root
+                labels.append("🏠 Home")
+                parents.append("")
+                values.append(0)
+                custom_text.append("")
+                marker_colors.append("#1e293b")
+
+                # Rooms
+                for room in room_names:
+                    room_df  = tree_df[tree_df["RoomLabel"] == room]
+                    room_val = float(room_df[value_col].sum())
+                    labels.append(room)
+                    parents.append("🏠 Home")
+                    values.append(room_val)
+                    custom_text.append(f"{room_val:.0f}")
+                    marker_colors.append(room_colour[room])
+
+                    # Units within room
+                    for unit in room_df["UnitLabel"].unique():
+                        unit_label = f"{room} › {unit}"
+                        unit_df    = room_df[room_df["UnitLabel"] == unit]
+                        unit_val   = float(unit_df[value_col].sum())
+                        labels.append(unit_label)
+                        parents.append(room)
+                        values.append(unit_val)
+                        custom_text.append(f"{unit_val:.0f}")
+                        # Slightly lighter shade of room colour
+                        marker_colors.append(room_colour[room] + "bb")
+
+                        # Items within unit
+                        for _, row in unit_df.iterrows():
+                            item_label = f"{row['item_name']} ({room}|{unit})"
+                            labels.append(item_label)
+                            parents.append(unit_label)
+                            values.append(float(row[value_col]))
+                            custom_text.append(row["item_name"])
+                            marker_colors.append(room_colour[room] + "66")
+
+                fig_sun = go.Figure(go.Sunburst(
+                    labels=labels,
+                    parents=parents,
+                    values=values,
+                    customdata=custom_text,
+                    hovertemplate="<b>%{customdata}</b><br>%s: %%{value:.0f}<extra></extra>"
+                                  % ("Qty" if view_metric == "Item Count" else "£"),
+                    texttemplate="<b>%{customdata}</b>",
+                    marker=dict(colors=marker_colors, line=dict(width=2, color="#0f172a")),
+                    branchvalues="total",
+                    maxdepth=3,
+                    insidetextorientation="radial",
+                    leaf=dict(opacity=0.85),
+                ))
+                fig_sun.update_layout(
+                    height=460,
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#f1f5f9", size=12),
+                )
+                st.plotly_chart(fig_sun, use_container_width=True)
+
+            # ── Right: Category stack per room ────────────────────────────
+            with col_bar:
+                st.markdown("**Category mix per room**")
+
+                cat_room = (
+                    tree_df.groupby(["Room", "category"])[value_col]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={
+                        "Room":     "Room",
+                        "category": "Category",
+                        value_col:  "Value",
+                    })
+                )
+
+                fig_stack = px.bar(
+                    cat_room,
+                    x="Value",
+                    y="Room",
+                    color="Category",
+                    orientation="h",
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                    labels={"Value": "Qty" if view_metric == "Item Count" else "£"},
+                    barmode="stack",
+                )
+                fig_stack.update_layout(
+                    height=460,
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(
+                        autorange="reversed",
+                        tickfont=dict(size=11, color="#cbd5e1"),
+                        gridcolor="rgba(255,255,255,0.05)",
+                    ),
+                    xaxis=dict(
+                        gridcolor="rgba(255,255,255,0.05)",
+                        tickfont=dict(color="#94a3b8"),
+                    ),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=-0.38,
+                        font=dict(size=10, color="#cbd5e1"),
+                    ),
+                    font=dict(color="#f1f5f9"),
+                    showlegend=True,
+                )
+                fig_stack.update_traces(
+                    marker_line_width=0,
+                    hovertemplate="<b>%{y}</b><br>%{fullData.name}: %{x:.0f}<extra></extra>",
+                )
+                st.plotly_chart(fig_stack, use_container_width=True)
+
 
 
 @st.dialog("➕ Add Maintenance Task", width="large")
