@@ -1,4 +1,5 @@
 
+
 # =============================================================================
 # app.py  —  Multi-Tenant Inventory Management System
 # Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
@@ -1283,17 +1284,6 @@ def dialog_view_room(loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame
                 qty_fmt = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
                 st.markdown(f"- **{item['item_name']}** — {qty_fmt} {u_str}".strip())
 
-    st.divider()
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        if st.button("➕ Add Unit", use_container_width=True):
-            dialog_add_unit(loc_id, name)
-    with b2:
-        if st.button("✏️ Edit Room", use_container_width=True):
-            dialog_edit_location(loc)
-    with b3:
-        if st.button("🗑️ Delete Room", use_container_width=True):
-            dialog_delete_location(loc_id, name)
 
 
 def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
@@ -1375,6 +1365,19 @@ def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFr
                 type="primary",
             ):
                 dialog_view_room(loc, loc_items, loc_units)
+
+            st.divider()
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("➕ Unit", key=f"add_unit_{loc_id}", use_container_width=True):
+                    dialog_add_unit(loc_id, name)
+            with b2:
+                if st.button("✏️ Edit", key=f"edit_loc_{loc_id}", use_container_width=True):
+                    dialog_edit_location(loc)
+            with b3:
+                if st.button("🗑️", key=f"del_loc_{loc_id}", use_container_width=True):
+                    dialog_delete_location(loc_id, name)
+
 
 
 def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
