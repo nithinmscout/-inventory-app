@@ -1,0 +1,879 @@
+# =============================================================================
+# app.py  —  Multi-Tenant Inventory Management System
+# Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
+# Auth    : Supabase Auth (JWT-based) + RLS for data isolation
+# Deploys : Streamlit Community Cloud (free tier)
+# =============================================================================
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from typing import Optional
+
+import altair as alt
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from supabase import Client, create_client
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.  PAGE CONFIGURATION
+# Must be the very first Streamlit call in the script.
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Inventory Manager",
+    page_icon="📦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.  CUSTOM CSS
+# CRITICAL: We target div[data-testid="..."] — stable HTML attributes that
+# survive Streamlit upgrades.  Never target volatile Emotion class names
+# like .css-1r6slb0 which change between builds and break silently.
+# ─────────────────────────────────────────────────────────────────────────────
+CUSTOM_CSS = """
+<style>
+/* ── Metric Cards ────────────────────────────────────────────────────────── */
+div[data-testid="metric-container"] {
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    padding: 15px 20px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+    border-left: 4px solid #4A90D9;
+    margin-bottom: 10px;
+    transition: box-shadow 0.2s ease;
+}
+div[data-testid="metric-container"]:hover {
+    box-shadow: 0 4px 18px rgba(74, 144, 217, 0.18);
+}
+div[data-testid="metric-container"] label {
+    color: #6c757d !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+}
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] div {
+    color: #cbd5e1 !important;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    color: #f1f5f9 !important;
+}
+
+/* ── Tab strip ───────────────────────────────────────────────────────────── */
+div[data-testid="stTabs"] button[role="tab"] {
+    font-weight: 600;
+    font-size: 0.93rem;
+    padding: 8px 18px;
+}
+
+/* ── Dataframe action bar ────────────────────────────────────────────────── */
+div[data-testid="stDataFrameContainer"] {
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.  SUPABASE CLIENT  —  @st.cache_resource
+# cache_resource creates ONE client per Streamlit server process.
+# On Community Cloud each deployed app gets its own isolated process, so
+# this is safe.  We call supabase.postgrest.auth(token) before every
+# authenticated PostgREST request to inject the user's JWT into the header.
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def _init_supabase_client() -> Client:
+    """
+    Reads credentials from st.secrets (populated from .streamlit/secrets.toml
+    locally, or from the Streamlit Community Cloud Secrets manager in prod).
+    """
+    url: str = st.secrets["SUPABASE_URL"]
+    key: str = st.secrets["SUPABASE_ANON_KEY"]
+    return create_client(url, key)
+
+
+# Module-level reference — safe to use throughout the script after this point.
+supabase: Client = _init_supabase_client()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4.  SESSION STATE BOOTSTRAP
+# Pre-populate every key we use to avoid KeyError on first run.
+# ─────────────────────────────────────────────────────────────────────────────
+_SESSION_DEFAULTS: dict = {
+    "auth_token":       None,   # JWT access token stored after login
+    "user_id":          None,   # UUID string of the logged-in user
+    "user_email":       None,   # Email string for display
+    "chart_selection":  None,   # Stores Altair on_select payload
+}
+
+for _k, _v in _SESSION_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  AUTHENTICATION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _clear_session() -> None:
+    """Wipe all auth-related session state — called on logout or bad token."""
+    for key in ("auth_token", "user_id", "user_email"):
+        st.session_state[key] = None
+
+
+def verify_session() -> bool:
+    """
+    Security gate executed on EVERY rerun.
+
+    Validates the stored JWT against Supabase Auth.  If the token is expired
+    or absent, we clear local state and redirect to the login page.
+
+    Returns True  → valid session, render the main app.
+    Returns False → no/expired session, render the auth page.
+    """
+    token: Optional[str] = st.session_state.get("auth_token")
+    if not token:
+        return False
+    try:
+        resp = supabase.auth.get_user(token)
+        if resp and resp.user:
+            # Refresh user fields on every check so they stay up-to-date.
+            st.session_state["user_id"]    = resp.user.id
+            st.session_state["user_email"] = resp.user.email
+            return True
+        _clear_session()
+        return False
+    except Exception:
+        # Token is dead (expired, revoked, or malformed).
+        _clear_session()
+        return False
+
+
+def _set_postgrest_auth() -> None:
+    """
+    Injects the user's JWT as the Bearer token for all PostgREST requests.
+    Must be called before every supabase.table(...).execute() call so that
+    the RLS policies evaluate auth.uid() correctly.
+    """
+    token: Optional[str] = st.session_state.get("auth_token")
+    if token:
+        supabase.postgrest.auth(token)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  AUTH PAGE  —  Login & Registration
+# ─────────────────────────────────────────────────────────────────────────────
+def render_auth_page() -> None:
+    """
+    Dual-mode Login / Register UI rendered when no valid session exists.
+    Uses supabase.auth.sign_in_with_password() and supabase.auth.sign_up().
+    On successful login the JWT is stored in st.session_state['auth_token']
+    and st.rerun() triggers the session gate to redirect to the main app.
+    """
+    # Centre the form using Streamlit columns
+    _, centre, _ = st.columns([1, 2, 1])
+    with centre:
+        st.markdown("## 📦 Inventory Manager")
+        st.caption("Multi-tenant · Free Tier · Powered by Supabase + Streamlit")
+        st.divider()
+
+        tab_login, tab_register = st.tabs(["🔑 Sign In", "📝 Create Account"])
+
+        # ── LOGIN ──────────────────────────────────────────────────────────
+        with tab_login:
+            with st.form("login_form"):
+                email    = st.text_input("Email address", placeholder="you@example.com")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button(
+                    "Sign In", use_container_width=True, type="primary"
+                )
+
+            if submitted:
+                if not email.strip() or not password:
+                    st.error("Please enter both email and password.")
+                else:
+                    try:
+                        resp = supabase.auth.sign_in_with_password(
+                            {"email": email.strip(), "password": password}
+                        )
+                        if resp.session:
+                            st.session_state["auth_token"] = resp.session.access_token
+                            st.session_state["user_id"]    = resp.user.id
+                            st.session_state["user_email"] = resp.user.email
+                            st.success("✅ Signed in! Loading your dashboard…")
+                            st.rerun()
+                        else:
+                            st.error("Sign-in failed. Please check your credentials.")
+                    except Exception as exc:
+                        st.error(f"Sign-in error: {exc}")
+
+        # ── REGISTER ───────────────────────────────────────────────────────
+        with tab_register:
+            with st.form("register_form"):
+                reg_email    = st.text_input("Email address", placeholder="you@example.com",
+                                             key="reg_email")
+                reg_pass     = st.text_input("Password (min 6 chars)", type="password",
+                                             key="reg_pass")
+                reg_confirm  = st.text_input("Confirm password", type="password",
+                                             key="reg_confirm")
+                reg_submitted = st.form_submit_button(
+                    "Create Account", use_container_width=True, type="primary"
+                )
+
+            if reg_submitted:
+                if not reg_email.strip() or not reg_pass:
+                    st.error("All fields are required.")
+                elif reg_pass != reg_confirm:
+                    st.error("Passwords do not match.")
+                elif len(reg_pass) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    try:
+                        resp = supabase.auth.sign_up(
+                            {"email": reg_email.strip(), "password": reg_pass}
+                        )
+                        if resp.user:
+                            st.success(
+                                "🎉 Account created! "
+                                "Check your email to confirm, then sign in."
+                            )
+                        else:
+                            st.error("Registration failed. Try a different email.")
+                    except Exception as exc:
+                        st.error(f"Registration error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7.  DATA ACCESS LAYER
+# All functions call _set_postgrest_auth() first so RLS works correctly.
+# Queries are batched at the top of render_main_app() to avoid N+1 problems.
+# ─────────────────────────────────────────────────────────────────────────────
+def fetch_inventory() -> pd.DataFrame:
+    """
+    Returns all inventory rows for the authenticated user.
+    RLS on the server enforces the user_id filter — no WHERE clause needed,
+    but the RLS USING clause is the authoritative security boundary.
+    """
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("inventory")
+            .select(
+                "id, item_name, quantity, custom_unit, description, "
+                "created_at, updated_at"
+            )
+            .order("created_at", desc=True)
+            .execute()
+        )
+        if resp.data:
+            df = pd.DataFrame(resp.data)
+            df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
+            return df
+        return pd.DataFrame(
+            columns=[
+                "id", "item_name", "quantity", "custom_unit",
+                "description", "created_at", "updated_at",
+            ]
+        )
+    except Exception as exc:
+        st.error(f"Failed to load inventory: {exc}")
+        return pd.DataFrame()
+
+
+def fetch_preferences() -> dict:
+    """
+    Fetches the user_preferences row for the current user.
+    Returns a dictionary of defaults if no row exists yet (first-time user).
+    Uses .maybe_single() which returns None instead of raising on 0 rows.
+    """
+    _default_layout: dict = {
+        "show_total_items":    True,
+        "show_total_quantity": True,
+        "show_low_stock":      True,
+    }
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("user_preferences")
+            .select("*")
+            .eq("user_id", st.session_state["user_id"])
+            .maybe_single()
+            .execute()
+        )
+        if resp.data:
+            # Parse dashboard_layout if it came back as a plain string
+            layout = resp.data.get("dashboard_layout", _default_layout)
+            if isinstance(layout, str):
+                layout = json.loads(layout)
+            resp.data["dashboard_layout"] = layout
+            return resp.data
+        return {"theme": "system", "dashboard_layout": _default_layout}
+    except Exception as exc:
+        st.toast(f"Could not load preferences: {exc}", icon="⚠️")
+        return {"theme": "system", "dashboard_layout": _default_layout}
+
+
+def upsert_preferences(prefs: dict) -> bool:
+    """
+    Insert-or-update user preferences.  The UNIQUE constraint on user_id
+    (defined in SQL) makes the on_conflict resolution unambiguous.
+    """
+    try:
+        _set_postgrest_auth()
+        supabase.table("user_preferences").upsert(
+            {
+                "user_id":          st.session_state["user_id"],
+                "theme":            prefs.get("theme", "system"),
+                "dashboard_layout": prefs.get("dashboard_layout", {}),
+            },
+            on_conflict="user_id",
+        ).execute()
+        return True
+    except Exception as exc:
+        st.error(f"Failed to save preferences: {exc}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  DIALOG  —  Add Inventory Item
+# @st.dialog renders a modal overlay, keeping the main page uncluttered.
+# On success we call st.rerun() which closes the dialog AND refreshes the grid.
+# ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("➕ Add Inventory Item", width="large")
+def dialog_add_item() -> None:
+    st.caption("All fields marked * are required.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        item_name = st.text_input("Item Name *", placeholder="e.g. Training Bibs")
+    with col_b:
+        quantity = st.number_input("Quantity *", min_value=0.0, step=1.0, value=1.0)
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        custom_unit = st.text_input("Unit", placeholder="e.g. pcs, kg, boxes")
+    with col_d:
+        st.empty()  # Spacer
+
+    description = st.text_area(
+        "Description / Notes", placeholder="Optional details…", height=100
+    )
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+
+    with col_save:
+        if st.button("💾 Save Item", type="primary", use_container_width=True):
+            if not item_name.strip():
+                st.error("Item Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("inventory").insert(
+                    {
+                        "user_id":     st.session_state["user_id"],
+                        "item_name":   item_name.strip(),
+                        "quantity":    float(quantity),
+                        "custom_unit": custom_unit.strip() or None,
+                        "description": description.strip() or None,
+                    }
+                ).execute()
+                st.toast("✅ Item added successfully!", icon="📦")
+                st.rerun()  # Closes dialog + triggers full data refresh
+            except Exception as exc:
+                st.error(f"Failed to add item: {exc}")
+
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9.  DIALOG  —  Edit Inventory Item
+# Pre-populated with the selected row's data passed as a dict argument.
+# ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("✏️ Edit Inventory Item", width="large")
+def dialog_edit_item(row: dict) -> None:
+    """
+    `row` is a dictionary of the selected inventory record.
+    We pass it directly when calling the dialog so the form is pre-filled.
+    """
+    st.caption(f"Editing item: **{row.get('item_name', '')}**")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        item_name = st.text_input("Item Name *", value=row.get("item_name", ""))
+    with col_b:
+        quantity = st.number_input(
+            "Quantity *",
+            min_value=0.0,
+            step=1.0,
+            value=float(row.get("quantity", 0)),
+        )
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        custom_unit = st.text_input("Unit", value=row.get("custom_unit") or "")
+    with col_d:
+        st.empty()
+
+    description = st.text_area(
+        "Description / Notes",
+        value=row.get("description") or "",
+        height=100,
+    )
+
+    st.divider()
+    col_update, col_cancel = st.columns(2)
+
+    with col_update:
+        if st.button("💾 Update Item", type="primary", use_container_width=True):
+            if not item_name.strip():
+                st.error("Item Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("inventory").update(
+                    {
+                        "item_name":   item_name.strip(),
+                        "quantity":    float(quantity),
+                        "custom_unit": custom_unit.strip() or None,
+                        "description": description.strip() or None,
+                        # updated_at is handled by the DB trigger, but
+                        # we set it here as a client-side fallback.
+                        "updated_at":  datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", row["id"]).execute()
+                st.toast("✅ Item updated!", icon="✏️")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Update failed: {exc}")
+
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. DIALOG  —  Confirm Delete
+# A safety gate before executing a destructive DELETE.
+# ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("🗑️ Confirm Deletion")
+def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
+    st.warning(
+        f"You are about to **permanently delete {len(ids)} item(s)**. "
+        "This cannot be undone."
+    )
+    for name in names[:10]:           # Cap list at 10 to avoid very long dialogs
+        st.markdown(f"- `{name}`")
+    if len(names) > 10:
+        st.markdown(f"_…and {len(names) - 10} more._")
+
+    st.divider()
+    col_del, col_cancel = st.columns(2)
+
+    with col_del:
+        if st.button("🗑️ Yes, Delete", type="primary", use_container_width=True):
+            try:
+                _set_postgrest_auth()
+                # .in_() deletes all matching IDs in a single round-trip
+                supabase.table("inventory").delete().in_("id", ids).execute()
+                st.toast(f"🗑️ Deleted {len(ids)} item(s).", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Deletion failed: {exc}")
+
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+def render_sidebar() -> None:
+    """
+    Global sidebar rendered on every authenticated page.
+    The Logout button calls supabase.auth.sign_out() to invalidate the
+    server-side session, then purges local state and forces a rerun.
+    """
+    with st.sidebar:
+        st.markdown("## 📦 Inventory Manager")
+        st.caption("Multi-tenant · Free Tier")
+        st.divider()
+
+        email: str  = st.session_state.get("user_email", "")
+        uid: str    = st.session_state.get("user_id", "")
+
+        st.markdown("**Signed in as**")
+        st.markdown(f"📧 `{email}`")
+        st.markdown(f"🔑 `{uid[:8]}…`" if uid else "")
+
+        st.divider()
+
+        if st.button("🚪 Sign Out", use_container_width=True, type="primary"):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass  # Always clear local state even if the API call fails
+            _clear_session()
+            st.rerun()
+
+        st.divider()
+        st.caption("Built with Streamlit + Supabase")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. DASHBOARD TAB
+# ─────────────────────────────────────────────────────────────────────────────
+def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
+    """
+    Renders KPI metrics controlled by the user_preferences.dashboard_layout
+    JSONB column, plus an Altair interactive bar chart and a Plotly donut chart.
+
+    The `df` and `prefs` are passed in (not re-fetched) to avoid N+1 queries.
+    """
+    layout: dict = prefs.get("dashboard_layout", {})
+
+    # ── KPI Metrics ───────────────────────────────────────────────────────
+    st.subheader("📊 Key Metrics")
+
+    total_items:    int   = len(df)
+    total_quantity: float = float(df["quantity"].sum()) if not df.empty else 0.0
+    low_stock:      int   = int((df["quantity"] < 5).sum()) if not df.empty else 0
+
+    # Build list of (label, value, delta_text) for each ENABLED metric
+    active: list[tuple] = []
+    if layout.get("show_total_items", True):
+        active.append(("Total Distinct Items", total_items, None))
+    if layout.get("show_total_quantity", True):
+        active.append(("Total Aggregate Quantity", f"{total_quantity:,.1f}", None))
+    if layout.get("show_low_stock", True):
+        low_label = "⚠️ Low Stock (qty < 5)"
+        active.append((low_label, low_stock, "items need restocking" if low_stock else "All stocked"))
+
+    if active:
+        metric_cols = st.columns(len(active))
+        for col, (label, value, help_text) in zip(metric_cols, active):
+            with col:
+                st.metric(label=label, value=value, help=help_text)
+    else:
+        st.info("All metrics are hidden. Enable them in ⚙️ Settings.")
+
+    st.divider()
+
+    if df.empty:
+        st.info("📭 Your inventory is empty — add items in the 📦 Inventory tab!")
+        return
+
+    # ── Altair Bar Chart  (item_name → quantity) ───────────────────────────
+    st.subheader("📊 Quantity by Item")
+    st.caption("Click a bar to highlight it — selection is stored in session state.")
+
+    chart_df = df[["item_name", "quantity"]].copy()
+    chart_df.columns = ["Item", "Quantity"]
+
+    selection = alt.selection_point(fields=["Item"])
+
+    bar = (
+        alt.Chart(chart_df)
+        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
+        .encode(
+            x=alt.X(
+                "Item:N",
+                sort="-y",
+                title="Item",
+                axis=alt.Axis(labelAngle=-30, labelLimit=120),
+            ),
+            y=alt.Y("Quantity:Q", title="Quantity"),
+            color=alt.condition(
+                selection,
+                alt.value("#4A90D9"),   # Selected bar colour
+                alt.value("#b8d4f0"),   # Unselected bar colour
+            ),
+            tooltip=[
+                alt.Tooltip("Item:N",     title="Item"),
+                alt.Tooltip("Quantity:Q", title="Qty", format=".2f"),
+            ],
+        )
+        .add_params(selection)
+        .properties(height=380)
+    )
+
+    chart_event = st.altair_chart(
+        bar,
+        theme="streamlit",           # Respects the user's system colour theme
+        use_container_width=True,
+        on_select="rerun",           # Triggers a rerun on bar click
+        key="altair_bar_chart",
+    )
+
+    # Store any bar selection in session state for cross-widget awareness
+    if chart_event:
+        st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
+
+    # ── Plotly Donut Chart  (distribution by custom_unit) ─────────────────
+    st.subheader("🍩 Inventory Distribution by Unit")
+
+    unit_df = df[["custom_unit", "quantity"]].copy()
+    unit_df["custom_unit"] = unit_df["custom_unit"].fillna("Unspecified")
+    unit_summary = (
+        unit_df.groupby("custom_unit")["quantity"]
+        .sum()
+        .reset_index()
+        .rename(columns={"custom_unit": "Unit", "quantity": "Total Quantity"})
+    )
+
+    if unit_summary["Total Quantity"].sum() > 0:
+        fig = px.pie(
+            unit_summary,
+            names="Unit",
+            values="Total Quantity",
+            hole=0.4,                          # Donut style
+            title="Total Quantity by Unit Type",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_traces(
+            textposition="inside",
+            textinfo="percent+label",
+            hovertemplate="<b>%{label}</b><br>Quantity: %{value:,.2f}<br>Share: %{percent}",
+        )
+        fig.update_layout(
+            margin=dict(t=60, b=10, l=10, r=10),
+            height=420,
+            showlegend=True,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Add items with units assigned to see this chart.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. INVENTORY TAB
+# ─────────────────────────────────────────────────────────────────────────────
+def render_inventory(df: pd.DataFrame) -> None:
+    """
+    Interactive data grid with:
+      • Dynamic column visibility (st.multiselect)
+      • Multi-row selection via on_select="rerun"
+      • Context-sensitive Edit / Delete buttons that open @st.dialog modals
+    """
+    st.subheader("📦 Inventory Items")
+
+    # ── Toolbar row ───────────────────────────────────────────────────────
+    col_btn, col_filter = st.columns([1, 3])
+    with col_btn:
+        if st.button("➕ Add Item", type="primary", use_container_width=True):
+            dialog_add_item()
+
+    # ── Column visibility filter ──────────────────────────────────────────
+    DISPLAY_COLS = ["item_name", "quantity", "custom_unit", "description", "updated_at"]
+    with col_filter:
+        visible_cols: list[str] = st.multiselect(
+            "Visible columns",
+            options=DISPLAY_COLS,
+            default=DISPLAY_COLS,
+            label_visibility="collapsed",
+        )
+    # Guard: never allow an empty selection — default back to all columns
+    if not visible_cols:
+        visible_cols = DISPLAY_COLS
+
+    if df.empty:
+        st.info("No items found. Click ➕ Add Item to get started.")
+        return
+
+    # Build the display dataframe: keep `id` hidden (for row identification)
+    # but include only the columns the user has selected.
+    safe_visible = [c for c in visible_cols if c in df.columns]
+    view_df = df[["id"] + safe_visible].copy()
+
+    # ── Interactive Dataframe ─────────────────────────────────────────────
+    grid_event = st.dataframe(
+        view_df.drop(columns=["id"]),   # Hide raw UUID from display
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="multi-row",
+        on_select="rerun",
+        key="inventory_grid",
+        column_config={
+            "item_name":   st.column_config.TextColumn("Item Name",    width="medium"),
+            "quantity":    st.column_config.NumberColumn("Qty",        format="%.2f"),
+            "custom_unit": st.column_config.TextColumn("Unit",        width="small"),
+            "description": st.column_config.TextColumn("Description", width="large"),
+            "updated_at":  st.column_config.DatetimeColumn(
+                "Last Updated", format="DD/MM/YYYY HH:mm"
+            ),
+        },
+    )
+
+    # ── Context action buttons ────────────────────────────────────────────
+    # These only appear after the user has clicked rows in the grid.
+    selected_rows: list[int] = []
+    if grid_event and hasattr(grid_event, "selection") and grid_event.selection:
+        selected_rows = grid_event.selection.get("rows", [])
+
+    if not selected_rows:
+        st.caption("Click row(s) in the table above to edit or delete them.")
+        return
+
+    selected_data   = view_df.iloc[selected_rows]
+    selected_ids    = selected_data["id"].tolist()
+    selected_names  = (
+        selected_data["item_name"].tolist()
+        if "item_name" in selected_data.columns
+        else selected_ids
+    )
+
+    st.markdown(f"**{len(selected_rows)} row(s) selected**")
+    col_edit, col_delete, col_spacer = st.columns([1, 1, 5])
+
+    with col_edit:
+        edit_disabled = len(selected_rows) != 1
+        edit_help     = "Select exactly 1 row to edit." if edit_disabled else None
+        if st.button(
+            "✏️ Edit",
+            disabled=edit_disabled,
+            help=edit_help,
+            use_container_width=True,
+        ):
+            # Fetch the full record from df (includes all fields not shown in grid)
+            full_row: dict = df[df["id"] == selected_ids[0]].iloc[0].to_dict()
+            dialog_edit_item(full_row)
+
+    with col_delete:
+        if st.button("🗑️ Delete", type="primary", use_container_width=True):
+            dialog_confirm_delete(selected_ids, selected_names)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. SETTINGS TAB
+# ─────────────────────────────────────────────────────────────────────────────
+def render_settings(prefs: dict) -> None:
+    """
+    User preference editor.  Reads current values from the `prefs` dict
+    (already fetched at the top of render_main_app), persists changes via
+    upsert_preferences() on button click.
+    """
+    col_settings, col_account = st.columns([3, 2])
+
+    with col_settings:
+        st.subheader("⚙️ Dashboard Layout")
+        st.caption("Toggle which KPI metrics appear on your dashboard.")
+
+        layout: dict = prefs.get("dashboard_layout", {})
+
+        show_items = st.toggle(
+            "Show 'Total Distinct Items'",
+            value=layout.get("show_total_items", True),
+        )
+        show_qty = st.toggle(
+            "Show 'Total Aggregate Quantity'",
+            value=layout.get("show_total_quantity", True),
+        )
+        show_low = st.toggle(
+            "Show 'Low Stock Alerts'",
+            value=layout.get("show_low_stock", True),
+        )
+
+        st.divider()
+        st.subheader("🎨 Appearance")
+        theme_options = ["system", "light", "dark"]
+        current_theme = prefs.get("theme", "system")
+        theme_index   = theme_options.index(current_theme) if current_theme in theme_options else 0
+        theme = st.selectbox(
+            "Preferred theme",
+            options=theme_options,
+            index=theme_index,
+            help="Streamlit Community Cloud honours the system setting.",
+        )
+
+        if st.button("💾 Save Preferences", type="primary"):
+            new_prefs = {
+                "theme": theme,
+                "dashboard_layout": {
+                    "show_total_items":    show_items,
+                    "show_total_quantity": show_qty,
+                    "show_low_stock":      show_low,
+                },
+            }
+            if upsert_preferences(new_prefs):
+                st.toast("✅ Preferences saved!", icon="💾")
+                st.rerun()
+
+    with col_account:
+        st.subheader("👤 Account")
+        st.markdown(f"**Email:**")
+        st.code(st.session_state.get("user_email", "—"), language=None)
+        st.markdown(f"**User ID (UUID):**")
+        st.code(st.session_state.get("user_id", "—"), language=None)
+        st.caption(
+            "Your User ID is the primary key used to isolate your data "
+            "via Row Level Security at the database level."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. MAIN APPLICATION SHELL
+# ─────────────────────────────────────────────────────────────────────────────
+def render_main_app() -> None:
+    """
+    Entry point for authenticated users.
+
+    Data is fetched ONCE here (single pass) and passed as arguments into
+    each tab renderer.  This is the architectural mitigation against N+1
+    query problems — there are exactly 2 Supabase round-trips per full rerun:
+        1. fetch_inventory()     → inventory table
+        2. fetch_preferences()   → user_preferences table
+    """
+    render_sidebar()
+
+    # ── Single-pass data fetch ─────────────────────────────────────────────
+    with st.spinner("Loading your data…"):
+        df:    pd.DataFrame = fetch_inventory()
+        prefs: dict         = fetch_preferences()
+
+    # ── Tab layout ─────────────────────────────────────────────────────────
+    tab_dash, tab_inv, tab_settings = st.tabs(
+        ["📊 Dashboard", "📦 Inventory", "⚙️ Settings"]
+    )
+
+    with tab_dash:
+        render_dashboard(df, prefs)
+
+    with tab_inv:
+        render_inventory(df)
+
+    with tab_settings:
+        render_settings(prefs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. ENTRY POINT  —  Security Gate
+#
+# This block runs on EVERY Streamlit rerun (page load, widget interaction,
+# dialog open/close).  verify_session() is the unconditional security gate:
+# if the JWT is absent or invalid the user ALWAYS sees the login page.
+# ─────────────────────────────────────────────────────────────────────────────
+if verify_session():
+    render_main_app()
+else:
+    render_auth_page()
