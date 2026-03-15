@@ -1060,6 +1060,7 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
         st.divider()
 
         # ── Global Search ──────────────────────────────────────────────────
+        st.markdown("Global Search")
         search_query = st.text_input(
             "🔍 Search inventory",
             placeholder="e.g. rice, lamp…",
