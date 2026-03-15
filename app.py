@@ -1,4 +1,5 @@
 
+
 # =============================================================================
 # app.py  —  Multi-Tenant Inventory Management System
 # Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
@@ -1591,8 +1592,12 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
                     parents=parents,
                     values=values,
                     customdata=custom_text,
-                    hovertemplate="<b>%{customdata}</b><br>%s: %%{value:.0f}<extra></extra>"
-                                  % ("Qty" if view_metric == "Item Count" else "£"),
+                    hovertemplate=(
+                        f"<b>%{{customdata}}</b><br>"
+                        f"{'Qty' if view_metric == 'Item Count' else '£'}: "
+                        f"%{{value:.0f}}<extra></extra>"
+                    ),
+
                     texttemplate="<b>%{customdata}</b>",
                     marker=dict(colors=marker_colors, line=dict(width=2, color="#0f172a")),
                     branchvalues="total",
