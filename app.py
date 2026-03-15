@@ -105,7 +105,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 def _esc(value: str) -> str:
     """HTML-escape any user-supplied string before injecting into markup."""
-    return html.escape(str(value or ""), quote=True)
+    return _html.escape(str(value or ""), quote=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  SUPABASE CLIENT
@@ -1057,32 +1057,29 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
     with st.sidebar:
-        st.markdown("## 📦 Inventory Manager")
-        st.caption("Multi-tenant · Free Tier")
         st.divider()
 
-        # ── Global Search ─────────────────────────────────────────────────
+        # ── Global Search ──────────────────────────────────────────────────
         search_query = st.text_input(
-            "🔍 Search inventory", placeholder="e.g. rice, lamp…",
+            "🔍 Search inventory",
+            placeholder="e.g. rice, lamp…",
             label_visibility="collapsed",
         )
         if search_query.strip():
-            q = search_query.strip().lower()
-            if not df.empty:
-                hits = df[df["item_name"].str.lower().str.contains(q, na=False)].copy()
-            else:
-                hits = pd.DataFrame()
-
+            q    = search_query.strip().lower()
+            hits = (
+                df[df["item_name"].str.lower().str.contains(q, na=False)].copy()
+                if not df.empty else pd.DataFrame()
+            )
             if hits.empty:
                 st.caption("No items match your search.")
             else:
-                loc_lookup = {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")} \
+                loc_lookup = (
+                    {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
                     if not locations_df.empty else {}
-
+                )
                 for _, hit in hits.iterrows():
                     loc_label = loc_lookup.get(hit.get("location_id"), "📦 Unassigned")
-
-                    # ── unit path resolution ──────────────────────────────────────
                     unit_id   = hit.get("unit_id")
                     unit_name = ""
                     if not units_df.empty and unit_id:
@@ -1090,46 +1087,42 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
                         if not u_row.empty:
                             unit_name = f" › {u_row.iloc[0]['icon']} {u_row.iloc[0]['name']}"
                     path_label = f"{loc_label}{unit_name}"
-                    # ─────────────────────────────────────────────────────────────
-
                     qty  = hit["quantity"]
                     unit = hit.get("custom_unit") or ""
                     st.markdown(
                         f"""
                         <div style="background:#1e293b;border-left:3px solid #14b8a6;
                                     border-radius:6px;padding:8px 12px;margin:4px 0;">
-                            <span style="color:#f1f5f9;font-weight:600;">{_esc(hit['item_name'])}</span><br>
-                            <span style="color:#94a3b8;font-size:0.8rem;">
-                                {qty:.0f} {_esc(unit)} · {_esc(path_label)}
-                            </span>
+                          <span style="color:#f1f5f9;font-weight:600;">{_esc(hit['item_name'])}</span><br>
+                          <span style="color:#94a3b8;font-size:0.8rem;">
+                            {qty:.0f} {_esc(unit)} · {_esc(path_label)}
+                          </span>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
 
-            st.divider()
-
-        email: str = st.session_state.get("user_email", "")
-        uid: str   = st.session_state.get("user_id", "")
-
-        st.markdown("**Signed in as**")
-        st.markdown(f"📧 `{email}`")
-        st.markdown(f"🔑 `{uid[:8]}…`" if uid else "")
         st.divider()
 
-        # ── Dashboard Settings ─────────────────────────────────────────────
-        with st.expander("⚙️ Dashboard Settings", expanded=False):
-            layout: dict = prefs.get("dashboard_layout", {})
-            show_items = st.toggle("Total Distinct Items",    value=layout.get("show_total_items", True),    key="s_show_items")
-            show_qty   = st.toggle("Total Aggregate Quantity", value=layout.get("show_total_quantity", True), key="s_show_qty")
-            show_low   = st.toggle("Low Stock Alerts",        value=layout.get("show_low_stock", True),      key="s_show_low")
+        # ── Account & Settings popover ─────────────────────────────────────
+        with st.popover("⚙️ Account & Settings", use_container_width=True):
+            email = str(st.session_state.get("user_email", ""))
+            uid   = str(st.session_state.get("user_id", ""))
 
+            # Dashboard layout
+            st.markdown("**Dashboard Layout**")
+            layout     = dict(prefs.get("dashboard_layout", {}))
+            show_items = st.toggle("Total Distinct Items",     value=layout.get("show_total_items", True),    key="pop_show_items")
+            show_qty   = st.toggle("Total Aggregate Quantity", value=layout.get("show_total_quantity", True), key="pop_show_qty")
+            show_low   = st.toggle("Low Stock Alerts",         value=layout.get("show_low_stock", True),      key="pop_show_low")
+
+            st.markdown("**Appearance**")
             theme_options = ["system", "light", "dark"]
             current_theme = prefs.get("theme", "system")
             theme_index   = theme_options.index(current_theme) if current_theme in theme_options else 0
-            theme = st.selectbox("Theme", options=theme_options, index=theme_index, key="s_theme")
+            theme         = st.selectbox("Theme", options=theme_options, index=theme_index, key="pop_theme")
 
-            if st.button("💾 Save Settings", type="primary", use_container_width=True):
+            if st.button("💾 Save Settings", type="primary", use_container_width=True, key="pop_save_settings"):
                 new_prefs = {
                     "theme": theme,
                     "dashboard_layout": {
@@ -1139,20 +1132,21 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
                     },
                 }
                 if upsert_preferences(new_prefs):
-                    st.toast("✅ Settings saved!", icon="💾")
+                    st.toast("✅ Settings saved!", icon="✅")
                     st.rerun()
 
-        st.divider()
+            st.divider()
 
-        # ── Account ────────────────────────────────────────────────────────
-        with st.expander("👤 Account", expanded=False):
-            st.markdown("**Email:**")
+            # Account info
+            st.markdown("**Account**")
+            st.markdown("Email")
             st.code(email, language=None)
-            st.markdown("**User ID:**")
+            st.markdown("User ID")
             st.code(uid, language=None)
             st.caption("Your UUID is the RLS isolation key at the database level.")
             st.divider()
 
+            # CSV export
             if not df.empty:
                 export_df = df.drop(columns=["id", "location_id"], errors="ignore").copy()
                 for col in ["expiry_date", "warranty_until", "created_at", "updated_at"]:
@@ -1162,7 +1156,7 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
                 st.download_button(
                     label="📥 Export Inventory as CSV",
                     data=csv_bytes,
-                    file_name=f"inventory_export_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    file_name=f"inventory_export_{datetime.now().strftime('%Y%m%d%H%M')}.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
@@ -1170,22 +1164,20 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
                 st.caption("No data to export yet.")
 
             st.divider()
+
             if st.button("🗑️ Delete My Account", use_container_width=True, type="primary",
-                         help="Permanently deletes your account and all data."):
+                         help="Permanently deletes your account and all data.", key="pop_del_account"):
                 dialog_delete_account()
 
-        st.divider()
+            if st.button("🚪 Sign Out", use_container_width=True, key="pop_sign_out"):
+                try:
+                    supabase.auth.sign_out()
+                except Exception:
+                    pass
+                _clear_session()
+                st.rerun()
 
-        if st.button("🚪 Sign Out", use_container_width=True, type="primary"):
-            try:
-                supabase.auth.sign_out()
-            except Exception:
-                pass
-            _clear_session()
-            st.rerun()
-
-        st.divider()
-        st.caption("Built with Streamlit + Supabase")
+        st.caption("Built with Streamlit · Supabase")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1313,9 +1305,10 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
             dialog_add_location()
 
     if locations_df.empty:
-        st.info(
-            "No locations yet. Click **📍 Add Location** to create rooms or "
-            "storage areas (e.g. Kitchen Shelf 1, Wardrobe)."
+        render_empty_state(
+            "No locations yet. Create a room or storage area to get started.",
+            "➕ Add First Location",
+            dialog_add_location,
         )
         return
 
@@ -1439,18 +1432,72 @@ def dialog_add_maintenance_task(inventory_df: pd.DataFrame) -> None:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
 
+@st.dialog("🛒 Log a Purchase", width="large")
+def dialog_log_purchase(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info("Add items to your inventory first.")
+        return
 
-def render_procurement(
-    df: pd.DataFrame,
-    shopping_df: pd.DataFrame,
-    locations_df: pd.DataFrame,
-) -> None:
+    with st.form("log_receipt_modal_form"):
+        item_names    = sorted(df["item_name"].unique().tolist())
+        selected_item = st.selectbox("Item *", options=item_names)
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            qty_bought    = st.number_input("Quantity Bought *", min_value=0.01, step=1.0, value=1.0)
+        with col_b:
+            total_paid    = st.number_input("Total Price Paid (£)", min_value=0.0, step=0.01, value=0.0)
+        with col_c:
+            purchase_date = st.date_input("Purchase Date", value=datetime.now(timezone.utc).date())
+
+        submitted = st.form_submit_button("💾 Log Receipt", type="primary", use_container_width=True)
+
+    if submitted:
+        if qty_bought <= 0:
+            st.error("Quantity must be greater than 0.")
+            return
+        try:
+            _set_postgrest_auth()
+            item_row     = df[df["item_name"] == selected_item].iloc[0]
+            cat          = item_row.get("category") or "Other"
+            new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
+
+            supabase.rpc("increment_inventory_quantity", {
+                "p_inventory_id":   str(item_row["id"]),
+                "p_quantity_delta": float(qty_bought),
+                "p_new_unit_cost":  new_unitcost,
+            }).execute()
+
+            supabase.table("shopping_history").insert({
+                "user_id":          st.session_state["user_id"],
+                "item_name":        selected_item,
+                "category":         cat,
+                "quantity_bought":  float(qty_bought),
+                "total_price_paid": float(total_paid),
+                "purchase_date":    purchase_date.isoformat(),
+                "inventory_id":     str(item_row["id"]),
+            }).execute()
+
+            st.toast(f"✅ Logged purchase of {selected_item}!", icon="🛒")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Failed to log receipt: {exc}")
+
+
+def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
     from datetime import timedelta
-
     loc_lookup = (
         {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
         if not locations_df.empty else {}
     )
+
+    # ── Page header with modal trigger ────────────────────────────────────
+    col_hdr, col_btn = st.columns([4, 1])
+    with col_hdr:
+        st.subheader("🛒 Procurement")
+    with col_btn:
+        if st.button("➕ Log Purchase", type="primary", use_container_width=True):
+            dialog_log_purchase(df, locations_df)
+    st.divider()
 
     # ── Section A: Low Stock ──────────────────────────────────────────────
     st.subheader("📉 Low Stock Items")
@@ -1480,61 +1527,6 @@ def render_procurement(
                      })
         total_budget = low["Est. Budget (£)"].sum()
         st.metric("🛒 Estimated Trip Budget", f"£{total_budget:,.2f}")
-
-    st.divider()
-
-    # ── Section B: Log Receipt ────────────────────────────────────────────
-    st.subheader("🧾 Log a Purchase")
-
-    if df.empty:
-        st.info("Add items to your inventory first.")
-    else:
-        with st.form("log_receipt_form"):
-            item_names = sorted(df["item_name"].unique().tolist())
-            selected_item = st.selectbox("Item *", options=item_names)
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                qty_bought = st.number_input("Quantity Bought *", min_value=0.01, step=1.0, value=1.0)
-            with col_b:
-                total_paid = st.number_input("Total Price Paid (£) *", min_value=0.0, step=0.01, value=0.0)
-            with col_c:
-                purchase_date = st.date_input("Purchase Date", value=datetime.now(timezone.utc).date())
-
-            submitted = st.form_submit_button("💾 Log Receipt", type="primary", use_container_width=True)
-
-        if submitted:
-            if qty_bought <= 0:
-                st.error("Quantity must be greater than 0.")
-            else:
-                try:
-                    _set_postgrest_auth()
-                    # Get existing row
-                    item_row = df[df["item_name"] == selected_item].iloc[0]
-                    cat          = item_row.get("category") or "Other"
-
-                    # Update inventory quantity + unit_cost
-                    new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
-                    supabase.rpc("increment_inventory_quantity", {
-                        "p_inventory_id":   str(item_row["id"]),
-                        "p_quantity_delta": float(qty_bought),
-                        "p_new_unit_cost":  new_unitcost,
-                    }).execute()
-
-                    # Insert shopping_history record
-                    supabase.table("shopping_history").insert({
-                        "user_id":          st.session_state["user_id"],
-                        "item_name":        selected_item,
-                        "category":         cat,
-                        "quantity_bought":  float(qty_bought),
-                        "total_price_paid": float(total_paid),
-                        "purchase_date":    purchase_date.isoformat(),
-                        "inventory_id":     str(item_row["id"]),    # ← anchors history to the item UUID
-                    }).execute()
-
-                    st.toast(f"✅ Logged purchase of {selected_item}!", icon="🧾")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Failed to log receipt: {exc}")
 
     st.divider()
 
@@ -1605,7 +1597,11 @@ def render_maintenance(maintenance_df: pd.DataFrame, df: pd.DataFrame) -> None:
             dialog_add_maintenance_task(df)
 
     if maintenance_df.empty:
-        st.info("No maintenance tasks yet. Click ➕ Add Task to create one.")
+        render_empty_state(
+            "No maintenance tasks yet. Track recurring jobs like filter changes or appliance servicing.",
+            "➕ Add First Task",
+            lambda: dialog_add_maintenance_task(df),
+        )
         return
 
     today = pd.Timestamp.now(tz="UTC").normalize()
@@ -1865,9 +1861,26 @@ def render_dashboard(
 # ─────────────────────────────────────────────────────────────────────────────
 # 14.  INVENTORY TAB
 # ─────────────────────────────────────────────────────────────────────────────
-def render_inventory(df: pd.DataFrame) -> None:
-    st.subheader("📦 Inventory Items")
+def render_empty_state(message: str, button_text: str, action) -> None:
+    """Centred empty-state card with a primary CTA button."""
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div style="text-align:center;padding:1.5rem 1rem 0.5rem 1rem;">
+                    <p style="font-size:2.5rem;margin:0 0 0.5rem 0">📭</p>
+                    <p style="color:#64748b;font-size:0.95rem;margin:0 0 1rem 0">
+                        {_esc(message)}
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button(button_text, type="primary", use_container_width=True):
+                action()
 
+def render_inventory(df: pd.DataFrame) -> None:
     col_btn, col_filter = st.columns([1, 3])
     with col_btn:
         if st.button("➕ Add Item", type="primary", use_container_width=True):
@@ -1881,68 +1894,98 @@ def render_inventory(df: pd.DataFrame) -> None:
             default=DISPLAY_COLS,
             label_visibility="collapsed",
         )
-    if not visible_cols:
-        visible_cols = DISPLAY_COLS
+        if not visible_cols:
+            visible_cols = DISPLAY_COLS
 
     if df.empty:
-        st.info("No items found. Click ➕ Add Item to get started.")
+        render_empty_state(
+            "No items yet. Add your first item to get started.",
+            "➕ Add First Item",
+            dialog_add_item,
+        )
         return
 
     safe_visible = [c for c in visible_cols if c in df.columns]
-    view_df      = df[["id"] + safe_visible].copy()
+    # view_df keeps "id" for DB lookups; it is NOT passed to the editor
+    view_df = df[["id"] + safe_visible].copy()
 
-    grid_event = st.dataframe(
-        view_df.drop(columns=["id"]),
+    # ── Process pending inline quantity edits (from previous interaction) ─
+    editor_state = st.session_state.get("inventory_editor") or {}
+    edited_rows  = editor_state.get("edited_rows", {})
+    if edited_rows:
+        saved = False
+        for idx_str, changes in edited_rows.items():
+            if "quantity" in changes:
+                idx = int(idx_str)
+                if idx < len(view_df):
+                    item_id = view_df.iloc[idx]["id"]
+                    new_qty = float(changes["quantity"])
+                    try:
+                        _set_postgrest_auth()
+                        supabase.table("inventory").update({
+                            "quantity":   new_qty,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", item_id).execute()
+                        saved = True
+                    except Exception as exc:
+                        st.error(f"Failed to save quantity for row {idx}: {exc}")
+        if saved:
+            st.session_state.pop("inventory_editor", None)
+            st.toast("✅ Quantity saved!", icon="✅")
+            st.rerun()
+
+    # ── Inline-editable table (only Qty column is editable) ──────────────
+    st.caption("✏️ Click any **Qty** cell to edit inline. Use the selector below to edit all fields or delete.")
+    st.data_editor(
+        view_df.drop(columns=["id"]),   # hide id from the user
+        key="inventory_editor",
         use_container_width=True,
         hide_index=True,
-        selection_mode="multi-row",
-        on_select="rerun",
-        key="inventory_grid",
+        num_rows="fixed",
         column_config={
-            "item_name":   st.column_config.TextColumn("Item Name",    width="medium"),
-            "quantity":    st.column_config.NumberColumn("Qty",        format="%.2f"),
-            "custom_unit": st.column_config.TextColumn("Unit",        width="small"),
-            "description": st.column_config.TextColumn("Description", width="large"),
-            "updated_at":  st.column_config.DatetimeColumn(
-                "Last Updated", format="DD/MM/YYYY HH:mm"
-            ),
+            "item_name":   st.column_config.TextColumn("Item Name",   width="medium", disabled=True),
+            "quantity":    st.column_config.NumberColumn("Qty",       format="%.2f",  disabled=False, min_value=0.0),
+            "custom_unit": st.column_config.TextColumn("Unit",        width="small",  disabled=True),
+            "description": st.column_config.TextColumn("Description", width="large",  disabled=True),
+            "updated_at":  st.column_config.DatetimeColumn("Last Updated", format="DD/MM/YYYY HH:mm", disabled=True),
         },
     )
 
-    selected_rows: list[int] = []
-    if grid_event and hasattr(grid_event, "selection") and grid_event.selection:
-        selected_rows = grid_event.selection.get("rows", [])
-
-    if not selected_rows:
-        st.caption("Click row(s) in the table above to edit or delete them.")
-        return
-
-    selected_data  = view_df.iloc[selected_rows]
-    selected_ids   = selected_data["id"].tolist()
-    selected_names = (
-        selected_data["item_name"].tolist()
-        if "item_name" in selected_data.columns
-        else selected_ids
+    # ── Row selector for full Edit / Delete ───────────────────────────────
+    st.divider()
+    selected_ids: list[str] = st.multiselect(
+        "Select items to edit or delete",
+        options=view_df["id"].tolist(),
+        format_func=lambda iid: (
+            view_df.loc[view_df["id"] == iid, "item_name"].iloc[0]
+            if not view_df.loc[view_df["id"] == iid].empty else iid
+        ),
+        label_visibility="collapsed",
+        placeholder="Select items to edit or delete…",
+        key="inv_selection",
     )
 
-    st.markdown(f"**{len(selected_rows)} row(s) selected**")
-    col_edit, col_delete, col_spacer = st.columns([1, 1, 5])
-
-    with col_edit:
-        edit_disabled = len(selected_rows) != 1
-        if st.button(
-            "✏️ Edit",
-            disabled=edit_disabled,
-            help="Select exactly 1 row to edit." if edit_disabled else None,
-            use_container_width=True,
-        ):
-            full_row: dict = df[df["id"] == selected_ids[0]].iloc[0].to_dict()
-            dialog_edit_item(full_row)
-
-    with col_delete:
-        if st.button("🗑️ Delete", type="primary", use_container_width=True):
-            dialog_confirm_delete(selected_ids, selected_names)
-
+    if selected_ids:
+        st.markdown(f"**{len(selected_ids)} row(s) selected**")
+        col_edit, col_delete, col_spacer = st.columns([1, 1, 5])
+        with col_edit:
+            edit_disabled = len(selected_ids) != 1
+            if st.button(
+                "✏️ Edit",
+                disabled=edit_disabled,
+                help="Select exactly 1 row to edit." if edit_disabled else None,
+                use_container_width=True,
+            ):
+                full_row = dict(df[df["id"] == selected_ids[0]].iloc[0].to_dict())
+                dialog_edit_item(full_row)
+        with col_delete:
+            if st.button("🗑️ Delete", type="primary", use_container_width=True):
+                selected_names = view_df.loc[
+                    view_df["id"].isin(selected_ids), "item_name"
+                ].tolist()
+                dialog_confirm_delete(selected_ids, selected_names)
+    else:
+        st.caption("Select items above to edit or delete them.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 15.  SETTINGS TAB
@@ -2000,38 +2043,48 @@ def render_settings(prefs: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_main_app() -> None:
+    # ── Fetch all data (one set of round-trips per rerun) ─────────────────
     with st.spinner("Loading your data…"):
         df:             pd.DataFrame = fetch_inventory()
         prefs:          dict         = fetch_preferences()
         locations_df:   pd.DataFrame = fetch_locations()
-        units_df:       pd.DataFrame = fetch_units()           # ← new
+        units_df:       pd.DataFrame = fetch_units()
         shopping_df:    pd.DataFrame = fetch_shopping_history()
         maintenance_df: pd.DataFrame = fetch_maintenance_tasks()
 
-    render_sidebar(prefs, df, locations_df, units_df)          # ← units_df added
+    # ── Page closures capture the fetched data ────────────────────────────
+    def _page_home():
+        render_home_tab(df, locations_df, units_df)
 
-    tab_loc, tab_inv, tab_dash, tab_proc, tab_maint = st.tabs([
-        "🏠 Locations",
-        "📦 Inventory",
-        "📊 Dashboard",
-        "🛒 Procurement",
-        "🔧 Maintenance",
-    ])
-
-    with tab_loc:
-        render_home_tab(df, locations_df, units_df)            # ← units_df added
-
-    with tab_inv:
+    def _page_inventory():
         render_inventory(df)
 
-    with tab_dash:
+    def _page_dashboard():
         render_dashboard(df, prefs, locations_df, maintenance_df)
 
-    with tab_proc:
+    def _page_procurement():
         render_procurement(df, shopping_df, locations_df)
 
-    with tab_maint:
+    def _page_maintenance():
         render_maintenance(maintenance_df, df)
+
+    # ── Register st.navigation pages ──────────────────────────────────────
+    pg = st.navigation(
+        [
+            st.Page(_page_home,        title="Home",        icon="🏠", default=True),
+            st.Page(_page_inventory,   title="Inventory",   icon="📦"),
+            st.Page(_page_dashboard,   title="Dashboard",   icon="📊"),
+            st.Page(_page_procurement, title="Procurement", icon="🛒"),
+            st.Page(_page_maintenance, title="Maintenance", icon="🔧"),
+        ],
+        position="sidebar",
+    )
+
+    # ── Custom sidebar content renders below the nav links ────────────────
+    render_sidebar(prefs, df, locations_df, units_df)
+
+    # ── Run the active page in the main area ──────────────────────────────
+    pg.run()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 17.  ENTRY POINT  —  Security Gate
