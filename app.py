@@ -1181,7 +1181,7 @@ def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) 
     st.divider()
 
     # ── Insurance Ledger ──────────────────────────────────────────────────
-    st.subheader("🏦 Insurance Ledger — Asset Value by Location")
+    st.subheader("🏦 Value by Location")
     st.caption("Sum of estimated values for Electronics, Appliances, and Valuables.")
 
     if "estimated_value" in df.columns:
