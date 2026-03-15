@@ -1,3 +1,14 @@
+
+#git config --global user.name "nithinmscout"
+#git config --global user.email "nithinm.pitchside@gmail.com"
+
+#git add .
+#git commit -m "Add home tab with location card grid and locations table"
+#git push origin main
+
+#SUPABASE_URL = "https://qfboehwxfliabbrzdvls.supabase.co"
+#SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmYm9laHd4ZmxpYWJicnpkdmxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5MDk3NDQsImV4cCI6MjA4ODQ4NTc0NH0.Zh6vHvsg7eUxayBqCjfNMu2X_Pwa9pZd9ZcWPsCbK1U"
+
 # =============================================================================
 # app.py  —  Multi-Tenant Inventory Management System
 # Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
@@ -17,9 +28,9 @@ import plotly.express as px
 import streamlit as st
 from supabase import Client, create_client
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1.  PAGE CONFIGURATION
-# Must be the very first Streamlit call in the script.
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Inventory Manager",
@@ -31,9 +42,6 @@ st.set_page_config(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2.  CUSTOM CSS
-# CRITICAL: We target div[data-testid="..."] — stable HTML attributes that
-# survive Streamlit upgrades.  Never target volatile Emotion class names
-# like .css-1r6slb0 which change between builds and break silently.
 # ─────────────────────────────────────────────────────────────────────────────
 CUSTOM_CSS = """
 <style>
@@ -42,13 +50,13 @@ div[data-testid="metric-container"] {
     background-color: #f8f9fa;
     border-radius: 8px;
     padding: 15px 20px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.07);
     border-left: 4px solid #4A90D9;
     margin-bottom: 10px;
     transition: box-shadow 0.2s ease;
 }
 div[data-testid="metric-container"]:hover {
-    box-shadow: 0 4px 18px rgba(74, 144, 217, 0.18);
+    box-shadow: 0 4px 18px rgba(74,144,217,0.18);
 }
 div[data-testid="metric-container"] label {
     color: #6c757d !important;
@@ -81,11 +89,23 @@ div[data-testid="stTabs"] button[role="tab"] {
     padding: 8px 18px;
 }
 
-/* ── Dataframe action bar ────────────────────────────────────────────────── */
+/* ── Dataframe ───────────────────────────────────────────────────────────── */
 div[data-testid="stDataFrameContainer"] {
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+}
+
+/* ── Location Cards hover lift ───────────────────────────────────────────── */
+div[data-testid="stVerticalBlock"]
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 14px !important;
+    transition: box-shadow 0.2s ease, transform 0.15s ease;
+}
+div[data-testid="stVerticalBlock"]
+div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    box-shadow: 0 6px 22px rgba(0,0,0,0.11) !important;
+    transform: translateY(-2px);
 }
 </style>
 """
@@ -93,36 +113,26 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  SUPABASE CLIENT  —  @st.cache_resource
-# cache_resource creates ONE client per Streamlit server process.
-# On Community Cloud each deployed app gets its own isolated process, so
-# this is safe.  We call supabase.postgrest.auth(token) before every
-# authenticated PostgREST request to inject the user's JWT into the header.
+# 3.  SUPABASE CLIENT
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def _init_supabase_client() -> Client:
-    """
-    Reads credentials from st.secrets (populated from .streamlit/secrets.toml
-    locally, or from the Streamlit Community Cloud Secrets manager in prod).
-    """
     url: str = st.secrets["SUPABASE_URL"]
     key: str = st.secrets["SUPABASE_ANON_KEY"]
     return create_client(url, key)
 
 
-# Module-level reference — safe to use throughout the script after this point.
 supabase: Client = _init_supabase_client()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  SESSION STATE BOOTSTRAP
-# Pre-populate every key we use to avoid KeyError on first run.
 # ─────────────────────────────────────────────────────────────────────────────
 _SESSION_DEFAULTS: dict = {
-    "auth_token":       None,   # JWT access token stored after login
-    "user_id":          None,   # UUID string of the logged-in user
-    "user_email":       None,   # Email string for display
-    "chart_selection":  None,   # Stores Altair on_select payload
+    "auth_token":      None,
+    "user_id":         None,
+    "user_email":      None,
+    "chart_selection": None,
 }
 
 for _k, _v in _SESSION_DEFAULTS.items():
@@ -134,61 +144,37 @@ for _k, _v in _SESSION_DEFAULTS.items():
 # 5.  AUTHENTICATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def _clear_session() -> None:
-    """Wipe all auth-related session state — called on logout or bad token."""
     for key in ("auth_token", "user_id", "user_email"):
         st.session_state[key] = None
 
 
 def verify_session() -> bool:
-    """
-    Security gate executed on EVERY rerun.
-
-    Validates the stored JWT against Supabase Auth.  If the token is expired
-    or absent, we clear local state and redirect to the login page.
-
-    Returns True  → valid session, render the main app.
-    Returns False → no/expired session, render the auth page.
-    """
     token: Optional[str] = st.session_state.get("auth_token")
     if not token:
         return False
     try:
         resp = supabase.auth.get_user(token)
         if resp and resp.user:
-            # Refresh user fields on every check so they stay up-to-date.
             st.session_state["user_id"]    = resp.user.id
             st.session_state["user_email"] = resp.user.email
             return True
         _clear_session()
         return False
     except Exception:
-        # Token is dead (expired, revoked, or malformed).
         _clear_session()
         return False
 
 
 def _set_postgrest_auth() -> None:
-    """
-    Injects the user's JWT as the Bearer token for all PostgREST requests.
-    Must be called before every supabase.table(...).execute() call so that
-    the RLS policies evaluate auth.uid() correctly.
-    """
     token: Optional[str] = st.session_state.get("auth_token")
     if token:
         supabase.postgrest.auth(token)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.  AUTH PAGE  —  Login & Registration
+# 6.  AUTH PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 def render_auth_page() -> None:
-    """
-    Dual-mode Login / Register UI rendered when no valid session exists.
-    Uses supabase.auth.sign_in_with_password() and supabase.auth.sign_up().
-    On successful login the JWT is stored in st.session_state['auth_token']
-    and st.rerun() triggers the session gate to redirect to the main app.
-    """
-    # Centre the form using Streamlit columns
     _, centre, _ = st.columns([1, 2, 1])
     with centre:
         st.markdown("## 📦 Inventory Manager")
@@ -197,7 +183,6 @@ def render_auth_page() -> None:
 
         tab_login, tab_register = st.tabs(["🔑 Sign In", "📝 Create Account"])
 
-        # ── LOGIN ──────────────────────────────────────────────────────────
         with tab_login:
             with st.form("login_form"):
                 email    = st.text_input("Email address", placeholder="you@example.com")
@@ -225,15 +210,11 @@ def render_auth_page() -> None:
                     except Exception as exc:
                         st.error(f"Sign-in error: {exc}")
 
-        # ── REGISTER ───────────────────────────────────────────────────────
         with tab_register:
             with st.form("register_form"):
-                reg_email    = st.text_input("Email address", placeholder="you@example.com",
-                                             key="reg_email")
-                reg_pass     = st.text_input("Password (min 6 chars)", type="password",
-                                             key="reg_pass")
-                reg_confirm  = st.text_input("Confirm password", type="password",
-                                             key="reg_confirm")
+                reg_email   = st.text_input("Email address", placeholder="you@example.com", key="reg_email")
+                reg_pass    = st.text_input("Password (min 6 chars)", type="password", key="reg_pass")
+                reg_confirm = st.text_input("Confirm password", type="password", key="reg_confirm")
                 reg_submitted = st.form_submit_button(
                     "Create Account", use_container_width=True, type="primary"
                 )
@@ -263,22 +244,16 @@ def render_auth_page() -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7.  DATA ACCESS LAYER
-# All functions call _set_postgrest_auth() first so RLS works correctly.
-# Queries are batched at the top of render_main_app() to avoid N+1 problems.
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_inventory() -> pd.DataFrame:
-    """
-    Returns all inventory rows for the authenticated user.
-    RLS on the server enforces the user_id filter — no WHERE clause needed,
-    but the RLS USING clause is the authoritative security boundary.
-    """
+    """Returns all inventory rows including location_id for home tab joins."""
     try:
         _set_postgrest_auth()
         resp = (
             supabase.table("inventory")
             .select(
                 "id, item_name, quantity, custom_unit, description, "
-                "created_at, updated_at"
+                "location_id, created_at, updated_at"
             )
             .order("created_at", desc=True)
             .execute()
@@ -290,7 +265,7 @@ def fetch_inventory() -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "id", "item_name", "quantity", "custom_unit",
-                "description", "created_at", "updated_at",
+                "description", "location_id", "created_at", "updated_at",
             ]
         )
     except Exception as exc:
@@ -298,12 +273,27 @@ def fetch_inventory() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_locations() -> pd.DataFrame:
+    """Returns all location rows for the authenticated user."""
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("locations")
+            .select("id, name, icon, color, description, created_at")
+            .order("created_at", desc=False)
+            .execute()
+        )
+        if resp.data:
+            return pd.DataFrame(resp.data)
+        return pd.DataFrame(
+            columns=["id", "name", "icon", "color", "description", "created_at"]
+        )
+    except Exception as exc:
+        st.error(f"Failed to load locations: {exc}")
+        return pd.DataFrame()
+
+
 def fetch_preferences() -> dict:
-    """
-    Fetches the user_preferences row for the current user.
-    Returns a dictionary of defaults if no row exists yet (first-time user).
-    Uses .maybe_single() which returns None instead of raising on 0 rows.
-    """
     _default_layout: dict = {
         "show_total_items":    True,
         "show_total_quantity": True,
@@ -319,7 +309,6 @@ def fetch_preferences() -> dict:
             .execute()
         )
         if resp.data:
-            # Parse dashboard_layout if it came back as a plain string
             layout = resp.data.get("dashboard_layout", _default_layout)
             if isinstance(layout, str):
                 layout = json.loads(layout)
@@ -332,10 +321,6 @@ def fetch_preferences() -> dict:
 
 
 def upsert_preferences(prefs: dict) -> bool:
-    """
-    Insert-or-update user preferences.  The UNIQUE constraint on user_id
-    (defined in SQL) makes the on_conflict resolution unambiguous.
-    """
     try:
         _set_postgrest_auth()
         supabase.table("user_preferences").upsert(
@@ -353,13 +338,158 @@ def upsert_preferences(prefs: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8.  DIALOG  —  Add Inventory Item
-# @st.dialog renders a modal overlay, keeping the main page uncluttered.
-# On success we call st.rerun() which closes the dialog AND refreshes the grid.
+# 8.  LOCATION COLOUR PALETTE
+# ─────────────────────────────────────────────────────────────────────────────
+_CARD_COLOURS: dict[str, str] = {
+    "Teal":   "#ccfbf1",
+    "Blue":   "#dbeafe",
+    "Green":  "#dcfce7",
+    "Purple": "#ede9fe",
+    "Yellow": "#fef9c3",
+    "Pink":   "#fce7f3",
+    "Orange": "#ffedd5",
+    "Grey":   "#f1f5f9",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9.  LOCATION DIALOGS
+# ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("📍 Add Location", width="large")
+def dialog_add_location() -> None:
+    st.caption("Locations are rooms or storage areas — e.g. Kitchen Shelf 1, Wardrobe.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        name = st.text_input("Location Name *", placeholder="e.g. Kitchen Shelf 1")
+    with col_b:
+        icon = st.text_input(
+            "Icon (emoji)", value="📦", max_chars=4,
+            help="Paste a single emoji as the card icon."
+        )
+
+    colour_label = st.selectbox("Card Colour", options=list(_CARD_COLOURS.keys()), index=0)
+    description  = st.text_area("Description (optional)", height=80)
+
+    chosen_hex = _CARD_COLOURS[colour_label]
+    st.markdown(
+        f"""
+        <div style="background:{chosen_hex};border-radius:12px;padding:16px 20px;
+                    border:1px solid rgba(0,0,0,0.06);margin-top:8px;">
+            <span style="font-size:1.5rem">{icon or '📦'}</span>
+            <span style="font-weight:700;font-size:1.1rem;margin-left:10px;">
+                {name or 'Location Name'}
+            </span>
+            <p style="color:#64748b;font-size:0.85rem;margin:4px 0 0 0;">
+                {description or 'No description'}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Location", type="primary", use_container_width=True):
+            if not name.strip():
+                st.error("Location Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("locations").insert({
+                    "user_id":     st.session_state["user_id"],
+                    "name":        name.strip(),
+                    "icon":        icon.strip() or "📦",
+                    "color":       chosen_hex,
+                    "description": description.strip() or None,
+                }).execute()
+                st.toast("📍 Location added!", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to add location: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("✏️ Edit Location", width="large")
+def dialog_edit_location(loc: dict) -> None:
+    col_a, col_b = st.columns(2)
+    with col_a:
+        name = st.text_input("Location Name *", value=loc.get("name", ""))
+    with col_b:
+        icon = st.text_input("Icon (emoji)", value=loc.get("icon", "📦"), max_chars=4)
+
+    stored_hex    = loc.get("color", "#ccfbf1")
+    hex_to_label  = {v: k for k, v in _CARD_COLOURS.items()}
+    current_label = hex_to_label.get(stored_hex, "Teal")
+    colour_label  = st.selectbox(
+        "Card Colour",
+        options=list(_CARD_COLOURS.keys()),
+        index=list(_CARD_COLOURS.keys()).index(current_label),
+    )
+    description = st.text_area(
+        "Description (optional)", value=loc.get("description") or "", height=80
+    )
+
+    st.divider()
+    col_update, col_cancel = st.columns(2)
+    with col_update:
+        if st.button("💾 Update", type="primary", use_container_width=True):
+            if not name.strip():
+                st.error("Location Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("locations").update({
+                    "name":        name.strip(),
+                    "icon":        icon.strip() or "📦",
+                    "color":       _CARD_COLOURS[colour_label],
+                    "description": description.strip() or None,
+                }).eq("id", loc["id"]).execute()
+                st.toast("✅ Location updated!", icon="✏️")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Update failed: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("🗑️ Delete Location")
+def dialog_delete_location(loc_id: str, loc_name: str) -> None:
+    st.warning(
+        f"Delete **{loc_name}**? Items assigned here become **Unassigned** "
+        "(not deleted). This cannot be undone."
+    )
+    col_del, col_cancel = st.columns(2)
+    with col_del:
+        if st.button("🗑️ Yes, Delete", type="primary", use_container_width=True):
+            try:
+                _set_postgrest_auth()
+                supabase.table("locations").delete().eq("id", loc_id).execute()
+                st.toast(f"🗑️ '{loc_name}' removed.", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Deletion failed: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10.  INVENTORY ITEM DIALOGS  (Add / Edit / Delete)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.dialog("➕ Add Inventory Item", width="large")
 def dialog_add_item() -> None:
     st.caption("All fields marked * are required.")
+
+    locs_df     = fetch_locations()
+    loc_options = {"— None —": None}
+    if not locs_df.empty:
+        for _, r in locs_df.iterrows():
+            loc_options[f"{r['icon']} {r['name']}"] = r["id"]
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -371,7 +501,8 @@ def dialog_add_item() -> None:
     with col_c:
         custom_unit = st.text_input("Unit", placeholder="e.g. pcs, kg, boxes")
     with col_d:
-        st.empty()  # Spacer
+        loc_label   = st.selectbox("Location", options=list(loc_options.keys()))
+        location_id = loc_options[loc_label]
 
     description = st.text_area(
         "Description / Notes", placeholder="Optional details…", height=100
@@ -387,17 +518,16 @@ def dialog_add_item() -> None:
                 return
             try:
                 _set_postgrest_auth()
-                supabase.table("inventory").insert(
-                    {
-                        "user_id":     st.session_state["user_id"],
-                        "item_name":   item_name.strip(),
-                        "quantity":    float(quantity),
-                        "custom_unit": custom_unit.strip() or None,
-                        "description": description.strip() or None,
-                    }
-                ).execute()
+                supabase.table("inventory").insert({
+                    "user_id":     st.session_state["user_id"],
+                    "item_name":   item_name.strip(),
+                    "quantity":    float(quantity),
+                    "custom_unit": custom_unit.strip() or None,
+                    "description": description.strip() or None,
+                    "location_id": location_id,
+                }).execute()
                 st.toast("✅ Item added successfully!", icon="📦")
-                st.rerun()  # Closes dialog + triggers full data refresh
+                st.rerun()
             except Exception as exc:
                 st.error(f"Failed to add item: {exc}")
 
@@ -406,26 +536,29 @@ def dialog_add_item() -> None:
             st.rerun()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9.  DIALOG  —  Edit Inventory Item
-# Pre-populated with the selected row's data passed as a dict argument.
-# ─────────────────────────────────────────────────────────────────────────────
 @st.dialog("✏️ Edit Inventory Item", width="large")
 def dialog_edit_item(row: dict) -> None:
-    """
-    `row` is a dictionary of the selected inventory record.
-    We pass it directly when calling the dialog so the form is pre-filled.
-    """
     st.caption(f"Editing item: **{row.get('item_name', '')}**")
+
+    locs_df     = fetch_locations()
+    loc_options = {"— None —": None}
+    if not locs_df.empty:
+        for _, r in locs_df.iterrows():
+            loc_options[f"{r['icon']} {r['name']}"] = r["id"]
+
+    # Find the currently assigned location label
+    current_loc_id    = row.get("location_id")
+    loc_id_to_label   = {v: k for k, v in loc_options.items()}
+    current_loc_label = loc_id_to_label.get(current_loc_id, "— None —")
+    loc_keys          = list(loc_options.keys())
+    loc_index         = loc_keys.index(current_loc_label) if current_loc_label in loc_keys else 0
 
     col_a, col_b = st.columns(2)
     with col_a:
         item_name = st.text_input("Item Name *", value=row.get("item_name", ""))
     with col_b:
         quantity = st.number_input(
-            "Quantity *",
-            min_value=0.0,
-            step=1.0,
+            "Quantity *", min_value=0.0, step=1.0,
             value=float(row.get("quantity", 0)),
         )
 
@@ -433,7 +566,8 @@ def dialog_edit_item(row: dict) -> None:
     with col_c:
         custom_unit = st.text_input("Unit", value=row.get("custom_unit") or "")
     with col_d:
-        st.empty()
+        loc_label   = st.selectbox("Location", options=loc_keys, index=loc_index)
+        location_id = loc_options[loc_label]
 
     description = st.text_area(
         "Description / Notes",
@@ -451,17 +585,14 @@ def dialog_edit_item(row: dict) -> None:
                 return
             try:
                 _set_postgrest_auth()
-                supabase.table("inventory").update(
-                    {
-                        "item_name":   item_name.strip(),
-                        "quantity":    float(quantity),
-                        "custom_unit": custom_unit.strip() or None,
-                        "description": description.strip() or None,
-                        # updated_at is handled by the DB trigger, but
-                        # we set it here as a client-side fallback.
-                        "updated_at":  datetime.now(timezone.utc).isoformat(),
-                    }
-                ).eq("id", row["id"]).execute()
+                supabase.table("inventory").update({
+                    "item_name":   item_name.strip(),
+                    "quantity":    float(quantity),
+                    "custom_unit": custom_unit.strip() or None,
+                    "description": description.strip() or None,
+                    "location_id": location_id,
+                    "updated_at":  datetime.now(timezone.utc).isoformat(),
+                }).eq("id", row["id"]).execute()
                 st.toast("✅ Item updated!", icon="✏️")
                 st.rerun()
             except Exception as exc:
@@ -472,17 +603,13 @@ def dialog_edit_item(row: dict) -> None:
             st.rerun()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. DIALOG  —  Confirm Delete
-# A safety gate before executing a destructive DELETE.
-# ─────────────────────────────────────────────────────────────────────────────
 @st.dialog("🗑️ Confirm Deletion")
 def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
     st.warning(
         f"You are about to **permanently delete {len(ids)} item(s)**. "
         "This cannot be undone."
     )
-    for name in names[:10]:           # Cap list at 10 to avoid very long dialogs
+    for name in names[:10]:
         st.markdown(f"- `{name}`")
     if len(names) > 10:
         st.markdown(f"_…and {len(names) - 10} more._")
@@ -494,7 +621,6 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
         if st.button("🗑️ Yes, Delete", type="primary", use_container_width=True):
             try:
                 _set_postgrest_auth()
-                # .in_() deletes all matching IDs in a single round-trip
                 supabase.table("inventory").delete().in_("id", ids).execute()
                 st.toast(f"🗑️ Deleted {len(ids)} item(s).", icon="✅")
                 st.rerun()
@@ -507,21 +633,16 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. SIDEBAR
+# 11.  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 def render_sidebar() -> None:
-    """
-    Global sidebar rendered on every authenticated page.
-    The Logout button calls supabase.auth.sign_out() to invalidate the
-    server-side session, then purges local state and forces a rerun.
-    """
     with st.sidebar:
         st.markdown("## 📦 Inventory Manager")
         st.caption("Multi-tenant · Free Tier")
         st.divider()
 
-        email: str  = st.session_state.get("user_email", "")
-        uid: str    = st.session_state.get("user_id", "")
+        email: str = st.session_state.get("user_email", "")
+        uid: str   = st.session_state.get("user_id", "")
 
         st.markdown("**Signed in as**")
         st.markdown(f"📧 `{email}`")
@@ -533,7 +654,7 @@ def render_sidebar() -> None:
             try:
                 supabase.auth.sign_out()
             except Exception:
-                pass  # Always clear local state even if the API call fails
+                pass
             _clear_session()
             st.rerun()
 
@@ -542,33 +663,195 @@ def render_sidebar() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12. DASHBOARD TAB
+# 12.  HOME TAB  —  Location Card Grid
+# ─────────────────────────────────────────────────────────────────────────────
+_CARDS_PER_ROW = 4
+
+
+def _location_card(col, loc: dict, loc_items: pd.DataFrame) -> None:
+    """Renders a single location card with an expandable item list."""
+    with col:
+        bg    = loc.get("color", "#e0f2fe")
+        icon  = loc.get("icon",  "📦")
+        name  = loc.get("name",  "Location")
+        count = len(loc_items)
+
+        if not loc_items.empty:
+            preview = ", ".join(loc_items["item_name"].head(3).tolist())
+            if count > 3:
+                preview += f" +{count - 3} more"
+        else:
+            preview = "No items yet"
+
+        # Coloured card header
+        st.markdown(
+            f"""
+            <div style="
+                background:{bg};
+                border-radius:12px 12px 0 0;
+                padding:14px 16px 10px 16px;
+                border:1px solid rgba(0,0,0,0.07);
+                border-bottom:none;">
+                <div style="display:flex;justify-content:space-between;
+                            align-items:center;">
+                    <span style="font-size:1.4rem">{icon}</span>
+                    <span style="font-size:0.75rem;color:#64748b;
+                                 background:rgba(255,255,255,0.65);
+                                 border-radius:20px;padding:2px 8px;">
+                        {count} item{'s' if count != 1 else ''}
+                    </span>
+                </div>
+                <p style="font-weight:700;font-size:1rem;
+                          margin:6px 0 2px 0;color:#0f172a;">{name}</p>
+                <p style="color:#64748b;font-size:0.82rem;margin:0;
+                          white-space:nowrap;overflow:hidden;
+                          text-overflow:ellipsis;">{preview}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Expandable item list
+        with st.container(border=True):
+            with st.expander("▾ View items", expanded=False):
+                if loc_items.empty:
+                    st.caption("No items assigned to this location.")
+                else:
+                    for _, item in loc_items.iterrows():
+                        unit = item.get("custom_unit") or ""
+                        qty  = (
+                            f"{item['quantity']:.0f}"
+                            if item["quantity"] == int(item["quantity"])
+                            else f"{item['quantity']:.2f}"
+                        )
+                        st.markdown(f"• **{item['item_name']}** — {qty} {unit}".strip())
+
+                st.divider()
+                btn_edit, btn_del = st.columns(2)
+                with btn_edit:
+                    if st.button(
+                        "✏️ Edit", key=f"edit_loc_{loc['id']}",
+                        use_container_width=True,
+                    ):
+                        dialog_edit_location(loc)
+                with btn_del:
+                    if st.button(
+                        "🗑️ Delete", key=f"del_loc_{loc['id']}",
+                        use_container_width=True,
+                    ):
+                        dialog_delete_location(loc["id"], loc["name"])
+
+
+def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
+    """
+    Card-grid home overview.
+    Each card = one location; clicking ▾ expands the item list in place.
+    Below the grid: flat summary table of all items across all locations.
+    """
+    col_hdr, col_add = st.columns([5, 1])
+    with col_hdr:
+        st.subheader("🏠 Home Overview")
+    with col_add:
+        if st.button("📍 Add Location", type="primary", use_container_width=True):
+            dialog_add_location()
+
+    if locations_df.empty:
+        st.info(
+            "No locations yet. Click **📍 Add Location** to create rooms or "
+            "storage areas (e.g. Kitchen Shelf 1, Wardrobe)."
+        )
+        return
+
+    locs = locations_df.to_dict("records")
+
+    # Card grid
+    for row_start in range(0, len(locs), _CARDS_PER_ROW):
+        row_locs = locs[row_start : row_start + _CARDS_PER_ROW]
+        cols     = st.columns(_CARDS_PER_ROW)
+
+        for col, loc in zip(cols, row_locs):
+            if not df.empty and "location_id" in df.columns:
+                loc_items = df[df["location_id"] == loc["id"]].copy()
+            else:
+                loc_items = pd.DataFrame()
+            _location_card(col, loc, loc_items)
+
+        st.write("")  # Row spacing
+
+    # Unassigned items
+    if not df.empty and "location_id" in df.columns:
+        unassigned = df[df["location_id"].isna()].copy()
+        if not unassigned.empty:
+            st.divider()
+            with st.expander(
+                f"📦 Unassigned Items ({len(unassigned)})", expanded=False
+            ):
+                for _, item in unassigned.iterrows():
+                    unit = item.get("custom_unit") or ""
+                    qty  = f"{item['quantity']:.0f}"
+                    st.markdown(f"• **{item['item_name']}** — {qty} {unit}".strip())
+
+    # Summary table
+    st.divider()
+    st.subheader("📋 All Items by Location")
+
+    if df.empty:
+        st.info("No inventory items yet.")
+        return
+
+    loc_lookup = (
+        {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+        if not locations_df.empty
+        else {}
+    )
+
+    summary = df[
+        ["item_name", "quantity", "custom_unit", "location_id", "updated_at"]
+    ].copy()
+    summary["Location"] = summary["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+    summary = summary.drop(columns=["location_id"])
+    summary = summary.rename(columns={
+        "item_name":   "Item",
+        "quantity":    "Quantity",
+        "custom_unit": "Unit",
+        "updated_at":  "Last Updated",
+    })
+    summary = summary.sort_values(["Location", "Item"]).reset_index(drop=True)
+
+    st.dataframe(
+        summary[["Location", "Item", "Quantity", "Unit", "Last Updated"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Quantity":     st.column_config.NumberColumn(format="%.2f"),
+            "Last Updated": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13.  DASHBOARD TAB
 # ─────────────────────────────────────────────────────────────────────────────
 def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
-    """
-    Renders KPI metrics controlled by the user_preferences.dashboard_layout
-    JSONB column, plus an Altair interactive bar chart and a Plotly donut chart.
-
-    The `df` and `prefs` are passed in (not re-fetched) to avoid N+1 queries.
-    """
     layout: dict = prefs.get("dashboard_layout", {})
 
-    # ── KPI Metrics ───────────────────────────────────────────────────────
     st.subheader("📊 Key Metrics")
 
     total_items:    int   = len(df)
     total_quantity: float = float(df["quantity"].sum()) if not df.empty else 0.0
     low_stock:      int   = int((df["quantity"] < 5).sum()) if not df.empty else 0
 
-    # Build list of (label, value, delta_text) for each ENABLED metric
     active: list[tuple] = []
     if layout.get("show_total_items", True):
         active.append(("Total Distinct Items", total_items, None))
     if layout.get("show_total_quantity", True):
         active.append(("Total Aggregate Quantity", f"{total_quantity:,.1f}", None))
     if layout.get("show_low_stock", True):
-        low_label = "⚠️ Low Stock (qty < 5)"
-        active.append((low_label, low_stock, "items need restocking" if low_stock else "All stocked"))
+        active.append((
+            "⚠️ Low Stock (qty < 5)",
+            low_stock,
+            "items need restocking" if low_stock else "All stocked",
+        ))
 
     if active:
         metric_cols = st.columns(len(active))
@@ -584,9 +867,9 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
         st.info("📭 Your inventory is empty — add items in the 📦 Inventory tab!")
         return
 
-    # ── Altair Bar Chart  (item_name → quantity) ───────────────────────────
+    # Altair bar chart
     st.subheader("📊 Quantity by Item")
-    st.caption("Click a bar to highlight it — selection is stored in session state.")
+    st.caption("Click a bar to highlight it.")
 
     chart_df = df[["item_name", "quantity"]].copy()
     chart_df.columns = ["Item", "Quantity"]
@@ -597,17 +880,12 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
         alt.Chart(chart_df)
         .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
         .encode(
-            x=alt.X(
-                "Item:N",
-                sort="-y",
-                title="Item",
-                axis=alt.Axis(labelAngle=-30, labelLimit=120),
-            ),
-            y=alt.Y("Quantity:Q", title="Quantity"),
+            x=alt.X("Item:N", sort="-y", axis=alt.Axis(labelAngle=-30, labelLimit=120)),
+            y=alt.Y("Quantity:Q"),
             color=alt.condition(
                 selection,
-                alt.value("#4A90D9"),   # Selected bar colour
-                alt.value("#b8d4f0"),   # Unselected bar colour
+                alt.value("#4A90D9"),
+                alt.value("#b8d4f0"),
             ),
             tooltip=[
                 alt.Tooltip("Item:N",     title="Item"),
@@ -620,17 +898,16 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
 
     chart_event = st.altair_chart(
         bar,
-        theme="streamlit",           # Respects the user's system colour theme
+        theme="streamlit",
         use_container_width=True,
-        on_select="rerun",           # Triggers a rerun on bar click
+        on_select="rerun",
         key="altair_bar_chart",
     )
 
-    # Store any bar selection in session state for cross-widget awareness
     if chart_event:
         st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
 
-    # ── Plotly Donut Chart  (distribution by custom_unit) ─────────────────
+    # Plotly donut
     st.subheader("🍩 Inventory Distribution by Unit")
 
     unit_df = df[["custom_unit", "quantity"]].copy()
@@ -647,7 +924,7 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
             unit_summary,
             names="Unit",
             values="Total Quantity",
-            hole=0.4,                          # Donut style
+            hole=0.4,
             title="Total Quantity by Unit Type",
             color_discrete_sequence=px.colors.qualitative.Set2,
         )
@@ -656,35 +933,23 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
             textinfo="percent+label",
             hovertemplate="<b>%{label}</b><br>Quantity: %{value:,.2f}<br>Share: %{percent}",
         )
-        fig.update_layout(
-            margin=dict(t=60, b=10, l=10, r=10),
-            height=420,
-            showlegend=True,
-        )
+        fig.update_layout(margin=dict(t=60, b=10, l=10, r=10), height=420)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Add items with units assigned to see this chart.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. INVENTORY TAB
+# 14.  INVENTORY TAB
 # ─────────────────────────────────────────────────────────────────────────────
 def render_inventory(df: pd.DataFrame) -> None:
-    """
-    Interactive data grid with:
-      • Dynamic column visibility (st.multiselect)
-      • Multi-row selection via on_select="rerun"
-      • Context-sensitive Edit / Delete buttons that open @st.dialog modals
-    """
     st.subheader("📦 Inventory Items")
 
-    # ── Toolbar row ───────────────────────────────────────────────────────
     col_btn, col_filter = st.columns([1, 3])
     with col_btn:
         if st.button("➕ Add Item", type="primary", use_container_width=True):
             dialog_add_item()
 
-    # ── Column visibility filter ──────────────────────────────────────────
     DISPLAY_COLS = ["item_name", "quantity", "custom_unit", "description", "updated_at"]
     with col_filter:
         visible_cols: list[str] = st.multiselect(
@@ -693,7 +958,6 @@ def render_inventory(df: pd.DataFrame) -> None:
             default=DISPLAY_COLS,
             label_visibility="collapsed",
         )
-    # Guard: never allow an empty selection — default back to all columns
     if not visible_cols:
         visible_cols = DISPLAY_COLS
 
@@ -701,14 +965,11 @@ def render_inventory(df: pd.DataFrame) -> None:
         st.info("No items found. Click ➕ Add Item to get started.")
         return
 
-    # Build the display dataframe: keep `id` hidden (for row identification)
-    # but include only the columns the user has selected.
     safe_visible = [c for c in visible_cols if c in df.columns]
-    view_df = df[["id"] + safe_visible].copy()
+    view_df      = df[["id"] + safe_visible].copy()
 
-    # ── Interactive Dataframe ─────────────────────────────────────────────
     grid_event = st.dataframe(
-        view_df.drop(columns=["id"]),   # Hide raw UUID from display
+        view_df.drop(columns=["id"]),
         use_container_width=True,
         hide_index=True,
         selection_mode="multi-row",
@@ -725,8 +986,6 @@ def render_inventory(df: pd.DataFrame) -> None:
         },
     )
 
-    # ── Context action buttons ────────────────────────────────────────────
-    # These only appear after the user has clicked rows in the grid.
     selected_rows: list[int] = []
     if grid_event and hasattr(grid_event, "selection") and grid_event.selection:
         selected_rows = grid_event.selection.get("rows", [])
@@ -735,9 +994,9 @@ def render_inventory(df: pd.DataFrame) -> None:
         st.caption("Click row(s) in the table above to edit or delete them.")
         return
 
-    selected_data   = view_df.iloc[selected_rows]
-    selected_ids    = selected_data["id"].tolist()
-    selected_names  = (
+    selected_data  = view_df.iloc[selected_rows]
+    selected_ids   = selected_data["id"].tolist()
+    selected_names = (
         selected_data["item_name"].tolist()
         if "item_name" in selected_data.columns
         else selected_ids
@@ -748,14 +1007,12 @@ def render_inventory(df: pd.DataFrame) -> None:
 
     with col_edit:
         edit_disabled = len(selected_rows) != 1
-        edit_help     = "Select exactly 1 row to edit." if edit_disabled else None
         if st.button(
             "✏️ Edit",
             disabled=edit_disabled,
-            help=edit_help,
+            help="Select exactly 1 row to edit." if edit_disabled else None,
             use_container_width=True,
         ):
-            # Fetch the full record from df (includes all fields not shown in grid)
             full_row: dict = df[df["id"] == selected_ids[0]].iloc[0].to_dict()
             dialog_edit_item(full_row)
 
@@ -765,14 +1022,9 @@ def render_inventory(df: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 14. SETTINGS TAB
+# 15.  SETTINGS TAB
 # ─────────────────────────────────────────────────────────────────────────────
 def render_settings(prefs: dict) -> None:
-    """
-    User preference editor.  Reads current values from the `prefs` dict
-    (already fetched at the top of render_main_app), persists changes via
-    upsert_preferences() on button click.
-    """
     col_settings, col_account = st.columns([3, 2])
 
     with col_settings:
@@ -781,18 +1033,9 @@ def render_settings(prefs: dict) -> None:
 
         layout: dict = prefs.get("dashboard_layout", {})
 
-        show_items = st.toggle(
-            "Show 'Total Distinct Items'",
-            value=layout.get("show_total_items", True),
-        )
-        show_qty = st.toggle(
-            "Show 'Total Aggregate Quantity'",
-            value=layout.get("show_total_quantity", True),
-        )
-        show_low = st.toggle(
-            "Show 'Low Stock Alerts'",
-            value=layout.get("show_low_stock", True),
-        )
+        show_items = st.toggle("Show 'Total Distinct Items'",    value=layout.get("show_total_items", True))
+        show_qty   = st.toggle("Show 'Total Aggregate Quantity'", value=layout.get("show_total_quantity", True))
+        show_low   = st.toggle("Show 'Low Stock Alerts'",        value=layout.get("show_low_stock", True))
 
         st.divider()
         st.subheader("🎨 Appearance")
@@ -800,9 +1043,7 @@ def render_settings(prefs: dict) -> None:
         current_theme = prefs.get("theme", "system")
         theme_index   = theme_options.index(current_theme) if current_theme in theme_options else 0
         theme = st.selectbox(
-            "Preferred theme",
-            options=theme_options,
-            index=theme_index,
+            "Preferred theme", options=theme_options, index=theme_index,
             help="Streamlit Community Cloud honours the system setting.",
         )
 
@@ -821,9 +1062,9 @@ def render_settings(prefs: dict) -> None:
 
     with col_account:
         st.subheader("👤 Account")
-        st.markdown(f"**Email:**")
+        st.markdown("**Email:**")
         st.code(st.session_state.get("user_email", "—"), language=None)
-        st.markdown(f"**User ID (UUID):**")
+        st.markdown("**User ID (UUID):**")
         st.code(st.session_state.get("user_id", "—"), language=None)
         st.caption(
             "Your User ID is the primary key used to isolate your data "
@@ -832,29 +1073,29 @@ def render_settings(prefs: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 15. MAIN APPLICATION SHELL
+# 16.  MAIN APPLICATION SHELL
 # ─────────────────────────────────────────────────────────────────────────────
 def render_main_app() -> None:
     """
-    Entry point for authenticated users.
-
-    Data is fetched ONCE here (single pass) and passed as arguments into
-    each tab renderer.  This is the architectural mitigation against N+1
-    query problems — there are exactly 2 Supabase round-trips per full rerun:
-        1. fetch_inventory()     → inventory table
-        2. fetch_preferences()   → user_preferences table
+    Single-pass data fetch: exactly 3 Supabase round-trips per full rerun.
+        1. fetch_inventory()   → inventory table
+        2. fetch_preferences() → user_preferences table
+        3. fetch_locations()   → locations table
+    All results passed as arguments — no N+1 queries inside tab renderers.
     """
     render_sidebar()
 
-    # ── Single-pass data fetch ─────────────────────────────────────────────
     with st.spinner("Loading your data…"):
-        df:    pd.DataFrame = fetch_inventory()
-        prefs: dict         = fetch_preferences()
+        df:           pd.DataFrame = fetch_inventory()
+        prefs:        dict         = fetch_preferences()
+        locations_df: pd.DataFrame = fetch_locations()
 
-    # ── Tab layout ─────────────────────────────────────────────────────────
-    tab_dash, tab_inv, tab_settings = st.tabs(
-        ["📊 Dashboard", "📦 Inventory", "⚙️ Settings"]
+    tab_home, tab_dash, tab_inv, tab_settings = st.tabs(
+        ["🏠 Home", "📊 Dashboard", "📦 Inventory", "⚙️ Settings"]
     )
+
+    with tab_home:
+        render_home_tab(df, locations_df)
 
     with tab_dash:
         render_dashboard(df, prefs)
@@ -867,11 +1108,7 @@ def render_main_app() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 16. ENTRY POINT  —  Security Gate
-#
-# This block runs on EVERY Streamlit rerun (page load, widget interaction,
-# dialog open/close).  verify_session() is the unconditional security gate:
-# if the JWT is absent or invalid the user ALWAYS sees the login page.
+# 17.  ENTRY POINT  —  Security Gate
 # ─────────────────────────────────────────────────────────────────────────────
 if verify_session():
     render_main_app()

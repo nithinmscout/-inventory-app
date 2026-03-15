@@ -40,9 +40,7 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
-.gitignore/
-  .streamlit/
-    secrets.toml
+.repomixignore
 app.py
 requirements.txt
 </directory_structure>
@@ -50,9 +48,8 @@ requirements.txt
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".gitignore/.streamlit/secrets.toml">
-SUPABASE_URL = "https://qfboehwxfliabbrzdvls.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmYm9laHd4ZmxpYWJicnpkdmxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5MDk3NDQsImV4cCI6MjA4ODQ4NTc0NH0.Zh6vHvsg7eUxayBqCjfNMu2X_Pwa9pZd9ZcWPsCbK1U"
+<file path=".repomixignore">
+.gitignore
 </file>
 
 <file path="app.py">
@@ -62,6 +59,12 @@ SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS
 # Auth    : Supabase Auth (JWT-based) + RLS for data isolation
 # Deploys : Streamlit Community Cloud (free tier)
 # =============================================================================
+#git config --global user.name "nithinmscout"
+#git config --global user.email "nithinm.pitchside@gmail.com"
+
+#SUPABASE_URL = "https://qfboehwxfliabbrzdvls.supabase.co"
+#SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmYm9laHd4ZmxpYWJicnpkdmxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5MDk3NDQsImV4cCI6MjA4ODQ4NTc0NH0.Zh6vHvsg7eUxayBqCjfNMu2X_Pwa9pZd9ZcWPsCbK1U"
+
 
 from __future__ import annotations
 

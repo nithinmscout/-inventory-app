@@ -1,0 +1,12 @@
+# Python / Streamlit
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+
+# OS / editor junk
+.DS_Store
+.vscode/
+
+# Repomix output
+repomix-output.xml
