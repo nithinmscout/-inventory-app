@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+import html as html
 import altair as alt
 import pandas as pd
 import plotly.express as px
@@ -102,6 +103,10 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
+def _esc(value: str) -> str:
+    """HTML-escape any user-supplied string before injecting into markup."""
+    return _html.escape(str(value or ""), quote=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  SUPABASE CLIENT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +153,13 @@ def verify_session() -> bool:
             st.session_state["user_id"]    = resp.user.id
             st.session_state["user_email"] = resp.user.email
             return True
+        # Token expired — attempt silent refresh
+        session = supabase.auth.get_session()
+        if session and session.access_token:
+            st.session_state["auth_token"] = session.access_token
+            st.session_state["user_id"]    = session.user.id
+            st.session_state["user_email"] = session.user.email
+            return True
         _clear_session()
         return False
     except Exception:
@@ -193,6 +205,14 @@ def render_auth_page() -> None:
                             st.session_state["auth_token"] = resp.session.access_token
                             st.session_state["user_id"]    = resp.user.id
                             st.session_state["user_email"] = resp.user.email
+                            # Seed default locations on first ever login
+                            try:
+                                supabase.postgrest.auth(resp.session.access_token)
+                                existing = supabase.table("locations").select("id").limit(1).execute()
+                                if not existing.data:
+                                    _seed_default_locations(resp.user.id, resp.session.access_token)
+                            except Exception:
+                                pass
                             st.success("✅ Signed in! Loading your dashboard…")
                             st.rerun()
                         else:
@@ -223,7 +243,6 @@ def render_auth_page() -> None:
                         )
                         if resp.user:
                             # Seed default household locations for new accounts
-                            _seed_default_locations(resp.user.id)
                             st.success(
                                 "🎉 Account created! "
                                 "Check your email to confirm, then sign in."
@@ -245,22 +264,25 @@ def fetch_inventory() -> pd.DataFrame:
             .select(
                 "id, item_name, category, quantity, custom_unit, description, "
                 "expiry_date, estimated_value, warranty_until, unit_cost, "
-                "min_threshold, location_id, created_at, updated_at"
+                "min_threshold, location_id, unit_id, created_at, updated_at"
             )
             .order("created_at", desc=True)
+            .range(0, 9999)
             .execute()
         )
         if resp.data:
             df = pd.DataFrame(resp.data)
-            for col in ["quantity", "estimated_value", "unit_cost", "min_threshold"]:
+            for col in ["quantity", "estimated_value", "unit_cost"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df["min_threshold"] = pd.to_numeric(df["min_threshold"], errors="coerce")
+            # Leave min_threshold as NaN when unset — procurement filters on .notna()
             df["expiry_date"]    = pd.to_datetime(df["expiry_date"],   errors="coerce")
             df["warranty_until"] = pd.to_datetime(df["warranty_until"], errors="coerce")
             return df
         return pd.DataFrame(columns=[
             "id", "item_name", "category", "quantity", "custom_unit", "description",
             "expiry_date", "estimated_value", "warranty_until", "unit_cost",
-            "min_threshold", "location_id", "created_at", "updated_at",
+            "min_threshold", "location_id", "unit_id", "created_at", "updated_at",
         ])
     except Exception as exc:
         st.error(f"Failed to load inventory: {exc}")
@@ -275,7 +297,8 @@ def fetch_locations() -> pd.DataFrame:
         resp = (
             supabase.table("locations")
             .select("id, name, icon, color, description, created_at")
-            .order("created_at", desc=False)
+            .order("created_at", desc=True)
+            .range(0, 9999)
             .execute()
         )
         if resp.data:
@@ -285,6 +308,23 @@ def fetch_locations() -> pd.DataFrame:
         )
     except Exception as exc:
         st.error(f"Failed to load locations: {exc}")
+        return pd.DataFrame()
+
+def fetch_units() -> pd.DataFrame:
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("units")
+            .select("id, location_id, name, icon, description, created_at")
+            .order("created_at", desc=False)
+            .range(0, 9999)
+            .execute()
+        )
+        if resp.data:
+            return pd.DataFrame(resp.data)
+        return pd.DataFrame(columns=["id", "location_id", "name", "icon", "description", "created_at"])
+    except Exception as exc:
+        st.error(f"Failed to load units: {exc}")
         return pd.DataFrame()
 
 
@@ -338,6 +378,7 @@ def fetch_shopping_history() -> pd.DataFrame:
             supabase.table("shopping_history")
             .select("id, item_name, category, quantity_bought, total_price_paid, purchase_date, created_at")
             .order("purchase_date", desc=True)
+            .range(0, 9999)
             .execute()
         )
         if resp.data:
@@ -362,6 +403,7 @@ def fetch_maintenance_tasks() -> pd.DataFrame:
             supabase.table("maintenance_tasks")
             .select("id, inventory_id, task_name, frequency_days, last_completed, next_due, created_at")
             .order("next_due", desc=False)
+            .range(0, 9999)
             .execute()
         )
         if resp.data:
@@ -419,14 +461,9 @@ _DEFAULT_LOCATIONS = [
     {"name": "Attic",          "icon": "📦", "color": "#ffedd5"},
 ]
 
-def _seed_default_locations(user_id: str) -> None:
-    """
-    Writes the standard household location set for a brand-new user.
-    Called immediately after supabase.auth.sign_up() succeeds.
-    Uses a service-role-style insert; the RLS INSERT policy allows it
-    because we pass the user's own ID.
-    """
+def _seed_default_locations(user_id: str, access_token: str) -> None:
     try:
+        supabase.postgrest.auth(access_token)
         rows = [
             {
                 "user_id":     user_id,
@@ -438,8 +475,9 @@ def _seed_default_locations(user_id: str) -> None:
             for loc in _DEFAULT_LOCATIONS
         ]
         supabase.table("locations").insert(rows).execute()
-    except Exception:
-        pass  # Non-fatal — user can add locations manually
+    except Exception as exc:
+        st.toast(f"Could not create default locations: {exc}", icon="⚠️")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -466,12 +504,12 @@ def dialog_add_location() -> None:
         f"""
         <div style="background:{chosen_hex};border-radius:12px;padding:16px 20px;
                     border:1px solid rgba(0,0,0,0.06);margin-top:8px;">
-            <span style="font-size:1.5rem">{icon or '📦'}</span>
+            <span style="font-size:1.5rem">{_esc(icon or '📦')}</span>
             <span style="font-weight:700;font-size:1.1rem;margin-left:10px;">
-                {name or 'Location Name'}
+                {_esc(name or 'Location Name')}
             </span>
             <p style="color:#64748b;font-size:0.85rem;margin:4px 0 0 0;">
-                {description or 'No description'}
+                {_esc(description or 'No description')}
             </p>
         </div>
         """,
@@ -567,6 +605,94 @@ def dialog_delete_location(loc_id: str, loc_name: str) -> None:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
 
+@st.dialog("➕ Add Storage Unit", width="large")
+def dialog_add_unit(location_id: str, location_name: str) -> None:
+    st.caption(f"Adding a storage unit inside **{location_name}**")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        name = st.text_input("Unit Name *", placeholder="e.g. Top Shelf, Wardrobe, Drawer 1")
+    with col_b:
+        icon = st.text_input("Icon (emoji)", value="📦", max_chars=4)
+    description = st.text_area("Description (optional)", height=80)
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Unit", type="primary", use_container_width=True):
+            if not name.strip():
+                st.error("Unit Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("units").insert({
+                    "user_id":     st.session_state["user_id"],
+                    "location_id": location_id,
+                    "name":        name.strip(),
+                    "icon":        icon.strip() or "📦",
+                    "description": description.strip() or None,
+                }).execute()
+                st.toast(f"✅ Unit '{name.strip()}' added!", icon="📦")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to add unit: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("✏️ Edit Storage Unit", width="large")
+def dialog_edit_unit(unit: dict) -> None:
+    col_a, col_b = st.columns(2)
+    with col_a:
+        name = st.text_input("Unit Name *", value=unit.get("name", ""))
+    with col_b:
+        icon = st.text_input("Icon (emoji)", value=unit.get("icon", "📦"), max_chars=4)
+    description = st.text_area("Description", value=unit.get("description") or "", height=80)
+
+    st.divider()
+    col_update, col_cancel = st.columns(2)
+    with col_update:
+        if st.button("💾 Update Unit", type="primary", use_container_width=True):
+            if not name.strip():
+                st.error("Unit Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("units").update({
+                    "name":        name.strip(),
+                    "icon":        icon.strip() or "📦",
+                    "description": description.strip() or None,
+                }).eq("id", unit["id"]).execute()
+                st.toast("✅ Unit updated!", icon="✏️")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Update failed: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("🗑️ Delete Storage Unit")
+def dialog_delete_unit(unit_id: str, unit_name: str) -> None:
+    st.warning(
+        f"Delete **{unit_name}**? Items inside it will become unassigned to any unit "
+        f"(they stay in the room). This cannot be undone."
+    )
+    col_del, col_cancel = st.columns(2)
+    with col_del:
+        if st.button("Yes, Delete", type="primary", use_container_width=True):
+            try:
+                _set_postgrest_auth()
+                supabase.table("units").delete().eq("id", unit_id).execute()
+                st.toast(f"🗑️ '{unit_name}' removed.", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Deletion failed: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
 @st.dialog("⚠️ Delete Account")
 def dialog_delete_account() -> None:
     st.error(
@@ -633,13 +759,26 @@ def dialog_add_item() -> None:
 
     col_e, col_f = st.columns(2)
     with col_e:
-        loc_label   = st.selectbox("Location", options=list(loc_options.keys()))
+        loc_label   = st.selectbox("Location", options=list(loc_options.keys()), key="add_loc")
         location_id = loc_options[loc_label]
     with col_f:
         min_threshold = st.number_input(
             "Min. Threshold", min_value=0.0, step=1.0, value=0.0,
             help="Alert in Procurement tab when quantity falls at or below this."
         )
+
+    # Unit picker — filtered live by chosen location
+    units_df = fetch_units()
+    unit_options = {"— In Room (no unit) —": None}
+    if not units_df.empty and location_id:
+        for _, ur in units_df[units_df["location_id"] == location_id].iterrows():
+            unit_options[f"{ur['icon']} {ur['name']}"] = ur["id"]
+    unit_label = st.selectbox(
+        "Storage Unit (optional)",
+        options=list(unit_options.keys()),
+        help="Select a shelf, drawer, wardrobe, etc. Leave blank if the item sits freely in the room.",
+    )
+    unit_id = unit_options[unit_label]
 
     col_g, col_h = st.columns(2)
     with col_g:
@@ -705,6 +844,7 @@ def dialog_add_item() -> None:
                     "custom_unit":     custom_unit.strip() or None,
                     "description":     description.strip() or None,
                     "location_id":     location_id,
+                    "unit_id":         unit_id,
                     "unit_cost":       unit_cost,
                     "min_threshold":   float(min_threshold),
                     "expiry_date":     expiry_date.isoformat() if expiry_date else None,
@@ -775,6 +915,27 @@ def dialog_edit_item(row: dict) -> None:
             "Min. Threshold", min_value=0.0, step=1.0,
             value=float(row.get("min_threshold") or 0.0),
         )
+    
+    # ADD after location_id is resolved, before min_threshold input:
+    units_df    = fetch_units()
+    unit_options = {"— In Room (no unit) —": None}
+    if not units_df.empty and location_id:
+        for _, ur in units_df[units_df["location_id"] == location_id].iterrows():
+            unit_options[f"{ur['icon']} {ur['name']}"] = ur["id"]
+
+    current_unit_id    = row.get("unit_id")
+    unit_id_to_label   = {v: k for k, v in unit_options.items()}
+    current_unit_label = unit_id_to_label.get(current_unit_id, "— In Room (no unit) —")
+    unit_keys          = list(unit_options.keys())
+    unit_index         = unit_keys.index(current_unit_label) if current_unit_label in unit_keys else 0
+
+    unit_label = st.selectbox(
+        "Storage Unit (optional)",
+        options=unit_keys,
+        index=unit_index,
+        help="Select a shelf, drawer, wardrobe, etc.",
+    )
+    unit_id = unit_options[unit_label]
 
     col_g, col_h = st.columns(2)
     with col_g:
@@ -798,7 +959,8 @@ def dialog_edit_item(row: dict) -> None:
         existing_expiry = row.get("expiry_date")
         if isinstance(existing_expiry, str):
             try:    existing_expiry = datetime.fromisoformat(existing_expiry).date()
-            except: existing_expiry = None
+            except (ValueError, TypeError, AttributeError):
+                existing_expiry = None
         elif hasattr(existing_expiry, "date"):
             existing_expiry = existing_expiry.date()
         expiry_date = st.date_input("Expiry Date", value=existing_expiry)
@@ -809,7 +971,8 @@ def dialog_edit_item(row: dict) -> None:
         existing_warranty = row.get("warranty_until")
         if isinstance(existing_warranty, str):
             try:    existing_warranty = datetime.fromisoformat(existing_warranty).date()
-            except: existing_warranty = None
+            except (ValueError, TypeError, AttributeError):
+                existing_warranty = None
         elif hasattr(existing_warranty, "date"):
             existing_warranty = existing_warranty.date()
         col_v, col_w = st.columns(2)
@@ -843,6 +1006,7 @@ def dialog_edit_item(row: dict) -> None:
                     "custom_unit":     custom_unit.strip() or None,
                     "description":     description.strip() or None,
                     "location_id":     location_id,
+                    "unit_id":         unit_id,
                     "unit_cost":       unit_cost,
                     "min_threshold":   float(min_threshold),
                     "expiry_date":     expiry_date.isoformat() if expiry_date else None,
@@ -891,7 +1055,7 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 11.  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
-def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
+def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
     with st.sidebar:
         st.markdown("## 📦 Inventory Manager")
         st.caption("Multi-tenant · Free Tier")
@@ -912,28 +1076,37 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame) ->
             if hits.empty:
                 st.caption("No items match your search.")
             else:
-                loc_lookup = (
-                    {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+                loc_lookup = {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")} \
                     if not locations_df.empty else {}
-                )
+
                 for _, hit in hits.iterrows():
                     loc_label = loc_lookup.get(hit.get("location_id"), "📦 Unassigned")
-                    qty       = hit["quantity"]
-                    unit      = hit.get("custom_unit") or ""
+
+                    # ── unit path resolution ──────────────────────────────────────
+                    unit_id   = hit.get("unit_id")
+                    unit_name = ""
+                    if not units_df.empty and unit_id:
+                        u_row = units_df[units_df["id"] == unit_id]
+                        if not u_row.empty:
+                            unit_name = f" › {u_row.iloc[0]['icon']} {u_row.iloc[0]['name']}"
+                    path_label = f"{loc_label}{unit_name}"
+                    # ─────────────────────────────────────────────────────────────
+
+                    qty  = hit["quantity"]
+                    unit = hit.get("custom_unit") or ""
                     st.markdown(
                         f"""
                         <div style="background:#1e293b;border-left:3px solid #14b8a6;
                                     border-radius:6px;padding:8px 12px;margin:4px 0;">
-                            <span style="color:#f1f5f9;font-weight:600;">
-                                {hit['item_name']}
-                            </span><br>
+                            <span style="color:#f1f5f9;font-weight:600;">{_esc(hit['item_name'])}</span><br>
                             <span style="color:#94a3b8;font-size:0.8rem;">
-                                {qty:.0f} {unit} · {loc_label}
+                                {qty:.0f} {_esc(unit)} · {_esc(path_label)}
                             </span>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
+
             st.divider()
 
         email: str = st.session_state.get("user_email", "")
@@ -1020,82 +1193,113 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame) ->
 # ─────────────────────────────────────────────────────────────────────────────
 _CARDS_PER_ROW = 4
 
-
-def _location_card(col, loc: dict, loc_items: pd.DataFrame) -> None:
-    """Renders a single location card with an expandable item list."""
+def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
     with col:
-        bg    = loc.get("color", "#e0f2fe")
-        icon  = loc.get("icon",  "📦")
-        name  = loc.get("name",  "Location")
-        count = len(loc_items)
+        bg      = loc.get("color", "#e0f2fe")
+        icon    = loc.get("icon", "📦")
+        name    = loc.get("name", "Location")
+        loc_id  = loc.get("id")
+        count   = len(loc_items) if not loc_items.empty else 0
 
-        if not loc_items.empty:
-            preview = ", ".join(loc_items["item_name"].head(3).tolist())
-            if count > 3:
-                preview += f" +{count - 3} more"
-        else:
-            preview = "No items yet"
+        # Items sitting directly in the room (no unit assigned)
+        direct_items = (
+            loc_items[loc_items["unit_id"].isna()].copy()
+            if not loc_items.empty and "unit_id" in loc_items.columns
+            else loc_items.copy()
+        )
+        preview_source = direct_items if not direct_items.empty else loc_items
+        preview = ", ".join(preview_source["item_name"].head(3).tolist()) if not preview_source.empty else "No items yet"
+        if count > 3:
+            preview += f" + {count - 3} more"
 
-        # Coloured card header
         st.markdown(
             f"""
-            <div style="
-                background:{bg};
-                border-radius:12px 12px 0 0;
-                padding:14px 16px 10px 16px;
-                border:1px solid rgba(0,0,0,0.07);
-                border-bottom:none;">
-                <div style="display:flex;justify-content:space-between;
-                            align-items:center;">
-                    <span style="font-size:1.4rem">{icon}</span>
-                    <span style="font-size:0.75rem;color:#64748b;
-                                 background:rgba(255,255,255,0.65);
-                                 border-radius:20px;padding:2px 8px;">
-                        {count} item{'s' if count != 1 else ''}
-                    </span>
-                </div>
-                <p style="font-weight:700;font-size:1rem;
-                          margin:6px 0 2px 0;color:#0f172a;">{name}</p>
-                <p style="color:#64748b;font-size:0.82rem;margin:0;
-                          white-space:nowrap;overflow:hidden;
-                          text-overflow:ellipsis;">{preview}</p>
+            <div style="background:{_esc(bg)};border-radius:12px 12px 0 0;
+                        padding:14px 16px 10px 16px;border:1px solid rgba(0,0,0,0.07);
+                        border-bottom:none;">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:1.4rem">{_esc(icon)}</span>
+                <span style="font-size:0.75rem;color:#64748b;background:rgba(255,255,255,0.65);
+                             border-radius:20px;padding:2px 8px">
+                  {count} item{'s' if count != 1 else ''}
+                </span>
+              </div>
+              <p style="font-weight:700;font-size:1rem;margin:6px 0 2px 0;color:#0f172a">
+                {_esc(name)}
+              </p>
+              <p style="color:#64748b;font-size:0.82rem;margin:0;white-space:nowrap;
+                        overflow:hidden;text-overflow:ellipsis">
+                {_esc(preview)}
+              </p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        # Expandable item list
         with st.container(border=True):
-            with st.expander("▾ View items", expanded=False):
-                if loc_items.empty:
-                    st.caption("No items assigned to this location.")
-                else:
-                    for _, item in loc_items.iterrows():
-                        unit = item.get("custom_unit") or ""
-                        qty  = (
-                            f"{item['quantity']:.0f}"
-                            if item["quantity"] == int(item["quantity"])
-                            else f"{item['quantity']:.2f}"
-                        )
-                        st.markdown(f"• **{item['item_name']}** — {qty} {unit}".strip())
+            # ── Units inside this location ─────────────────────────────
+            if not loc_units.empty:
+                for _, unit in loc_units.iterrows():
+                    uid        = unit["id"]
+                    uname      = unit.get("name", "Unit")
+                    uicon      = unit.get("icon", "📦")
+                    unit_items = (
+                        loc_items[loc_items["unit_id"] == uid].copy()
+                        if not loc_items.empty and "unit_id" in loc_items.columns
+                        else pd.DataFrame()
+                    )
+                    ucount = len(unit_items)
+
+                    col_hdr, col_edit, col_del = st.columns([5, 1, 1])
+                    with col_hdr:
+                        st.markdown(f"**{_esc(uicon)} {_esc(uname)}** — {ucount} item{'s' if ucount != 1 else ''}")
+                    with col_edit:
+                        if st.button("✏️", key=f"edit_unit_{uid}", help="Edit unit"):
+                            dialog_edit_unit(unit.to_dict())
+                    with col_del:
+                        if st.button("🗑️", key=f"del_unit_{uid}", help="Delete unit"):
+                            dialog_delete_unit(uid, uname)
+
+                    with st.expander(f"View items in {uicon} {uname}", expanded=False):
+                        if unit_items.empty:
+                            st.caption("No items in this unit yet.")
+                        else:
+                            for _, item in unit_items.iterrows():
+                                unit_str = item.get("custom_unit") or ""
+                                qty      = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
+                                st.markdown(f"- **{item['item_name']}** — {qty} {unit_str}".strip())
 
                 st.divider()
-                btn_edit, btn_del = st.columns(2)
-                with btn_edit:
-                    if st.button(
-                        "✏️ Edit", key=f"edit_loc_{loc['id']}",
-                        use_container_width=True,
-                    ):
-                        dialog_edit_location(loc)
-                with btn_del:
-                    if st.button(
-                        "🗑️ Delete", key=f"del_loc_{loc['id']}",
-                        use_container_width=True,
-                    ):
-                        dialog_delete_location(loc["id"], loc["name"])
+
+            # ── Items directly in room (no unit) ──────────────────────
+            with st.expander(
+                f"🏠 Directly in room ({len(direct_items)} item{'s' if len(direct_items) != 1 else ''})",
+                expanded=False,
+            ):
+                if direct_items.empty:
+                    st.caption("No items placed directly in this room.")
+                else:
+                    for _, item in direct_items.iterrows():
+                        unit_str = item.get("custom_unit") or ""
+                        qty      = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
+                        st.markdown(f"- **{item['item_name']}** — {qty} {unit_str}".strip())
+
+            st.divider()
+
+            # ── Add unit + Edit/Delete location buttons ────────────────
+            btn_add_unit, btn_edit, btn_del = st.columns(3)
+            with btn_add_unit:
+                if st.button("➕ Add Unit", key=f"add_unit_{loc_id}", use_container_width=True):
+                    dialog_add_unit(loc_id, name)
+            with btn_edit:
+                if st.button("✏️ Edit", key=f"edit_loc_{loc_id}", use_container_width=True):
+                    dialog_edit_location(loc)
+            with btn_del:
+                if st.button("🗑️ Delete", key=f"del_loc_{loc_id}", use_container_width=True):
+                    dialog_delete_location(loc_id, name)
 
 
-def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
+def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
     """
     Card-grid home overview.
     Each card = one location; clicking ▾ expands the item list in place.
@@ -1127,7 +1331,11 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
                 loc_items = df[df["location_id"] == loc["id"]].copy()
             else:
                 loc_items = pd.DataFrame()
-            _location_card(col, loc, loc_items)
+            loc_units = (
+                units_df[units_df["location_id"] == loc["id"]].copy()
+                if not units_df.empty else pd.DataFrame()
+            )
+            _location_card(col, loc, loc_items, loc_units)
 
         st.write("")  # Row spacing
 
@@ -1249,8 +1457,7 @@ def render_procurement(
     st.caption("Items where current quantity ≤ min_threshold.")
 
     if not df.empty and "min_threshold" in df.columns:
-        low = df[df["quantity"] <= df["min_threshold"]].copy()
-        low = low[low["min_threshold"] > 0]   # ignore items with threshold = 0
+        low = df[df["min_threshold"].notna() & (df["quantity"] <= df["min_threshold"])].copy()
     else:
         low = pd.DataFrame()
 
@@ -1303,16 +1510,15 @@ def render_procurement(
                     _set_postgrest_auth()
                     # Get existing row
                     item_row = df[df["item_name"] == selected_item].iloc[0]
-                    new_qty      = float(item_row["quantity"]) + float(qty_bought)
-                    new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else item_row.get("unit_cost")
                     cat          = item_row.get("category") or "Other"
 
                     # Update inventory quantity + unit_cost
-                    supabase.table("inventory").update({
-                        "quantity":   new_qty,
-                        "unit_cost":  new_unitcost,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", item_row["id"]).execute()
+                    new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
+                    supabase.rpc("increment_inventory_quantity", {
+                        "p_inventory_id":   str(item_row["id"]),
+                        "p_quantity_delta": float(qty_bought),
+                        "p_new_unit_cost":  new_unitcost,
+                    }).execute()
 
                     # Insert shopping_history record
                     supabase.table("shopping_history").insert({
@@ -1322,6 +1528,7 @@ def render_procurement(
                         "quantity_bought":  float(qty_bought),
                         "total_price_paid": float(total_paid),
                         "purchase_date":    purchase_date.isoformat(),
+                        "inventory_id":     str(item_row["id"]),    # ← anchors history to the item UUID
                     }).execute()
 
                     st.toast(f"✅ Logged purchase of {selected_item}!", icon="🧾")
@@ -1793,23 +2000,15 @@ def render_settings(prefs: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_main_app() -> None:
-    """
-    5 Supabase round-trips per full rerun:
-        1. fetch_inventory()
-        2. fetch_preferences()
-        3. fetch_locations()
-        4. fetch_shopping_history()
-        5. fetch_maintenance_tasks()
-    All passed as arguments — no N+1 queries inside renderers.
-    """
     with st.spinner("Loading your data…"):
-        df:              pd.DataFrame = fetch_inventory()
-        prefs:           dict         = fetch_preferences()
-        locations_df:    pd.DataFrame = fetch_locations()
-        shopping_df:     pd.DataFrame = fetch_shopping_history()
-        maintenance_df:  pd.DataFrame = fetch_maintenance_tasks()
+        df:             pd.DataFrame = fetch_inventory()
+        prefs:          dict         = fetch_preferences()
+        locations_df:   pd.DataFrame = fetch_locations()
+        units_df:       pd.DataFrame = fetch_units()           # ← new
+        shopping_df:    pd.DataFrame = fetch_shopping_history()
+        maintenance_df: pd.DataFrame = fetch_maintenance_tasks()
 
-    render_sidebar(prefs, df, locations_df)
+    render_sidebar(prefs, df, locations_df, units_df)          # ← units_df added
 
     tab_loc, tab_inv, tab_dash, tab_proc, tab_maint = st.tabs([
         "🏠 Locations",
@@ -1820,7 +2019,7 @@ def render_main_app() -> None:
     ])
 
     with tab_loc:
-        render_home_tab(df, locations_df)
+        render_home_tab(df, locations_df, units_df)            # ← units_df added
 
     with tab_inv:
         render_inventory(df)
