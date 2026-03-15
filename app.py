@@ -98,6 +98,21 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
     box-shadow: 0 6px 22px rgba(0,0,0,0.11) !important;
     transform: translateY(-2px);
 }
+/* KPI metric cards */
+.kpi-card {
+    border-radius: 12px;
+    padding: 20px 22px;
+    border: 1px solid rgba(255,255,255,0.06);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    margin-bottom: 8px;
+}
+/* Location card unit progress bar */
+.unit-bar-track {
+    background: #e2e8f0;
+    border-radius: 4px;
+    height: 5px;
+    margin: 4px 0 10px 0;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -1184,54 +1199,48 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
 # ─────────────────────────────────────────────────────────────────────────────
-_CARDS_PER_ROW = 4
+_CARDS_PER_ROW = 3
 
 def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
     with col:
-        bg      = loc.get("color", "#e0f2fe")
-        icon    = loc.get("icon", "📦")
-        name    = loc.get("name", "Location")
-        loc_id  = loc.get("id")
-        count   = len(loc_items) if not loc_items.empty else 0
+        bg     = loc.get("color", "#e0f2fe")
+        icon   = loc.get("icon", "📦")
+        name   = loc.get("name", "Location")
+        loc_id = loc.get("id")
+        count  = len(loc_items) if not loc_items.empty else 0
 
-        # Items sitting directly in the room (no unit assigned)
         direct_items = (
             loc_items[loc_items["unit_id"].isna()].copy()
             if not loc_items.empty and "unit_id" in loc_items.columns
             else loc_items.copy()
         )
-        preview_source = direct_items if not direct_items.empty else loc_items
-        preview = ", ".join(preview_source["item_name"].head(3).tolist()) if not preview_source.empty else "No items yet"
-        if count > 3:
-            preview += f" + {count - 3} more"
 
+        # ── Big coloured header ──────────────────────────────────────
         st.markdown(
             f"""
-            <div style="background:{_esc(bg)};border-radius:12px 12px 0 0;
-                        padding:14px 16px 10px 16px;border:1px solid rgba(0,0,0,0.07);
-                        border-bottom:none;">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="font-size:1.4rem">{_esc(icon)}</span>
-                <span style="font-size:0.75rem;color:#64748b;background:rgba(255,255,255,0.65);
-                             border-radius:20px;padding:2px 8px">
-                  {count} item{'s' if count != 1 else ''}
-                </span>
+            <div style="background:{_esc(bg)};border-radius:16px 16px 0 0;
+                        padding:22px 24px 18px 24px;
+                        border:1px solid rgba(0,0,0,0.08);border-bottom:none;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div>
+                  <p style="font-weight:800;font-size:1.5rem;margin:0 0 4px 0;
+                             color:#0f172a;line-height:1.2">{_esc(name)}</p>
+                  <p style="color:#475569;font-size:0.8rem;margin:0">
+                    {count} item{'s' if count != 1 else ''}
+                  </p>
+                </div>
+                <span style="font-size:3.2rem;line-height:1;opacity:0.9">{_esc(icon)}</span>
               </div>
-              <p style="font-weight:700;font-size:1rem;margin:6px 0 2px 0;color:#0f172a">
-                {_esc(name)}
-              </p>
-              <p style="color:#64748b;font-size:0.82rem;margin:0;white-space:nowrap;
-                        overflow:hidden;text-overflow:ellipsis">
-                {_esc(preview)}
-              </p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
         with st.container(border=True):
-            # ── Units inside this location ─────────────────────────────
+            # ── Unit rows ────────────────────────────────────────────
             if not loc_units.empty:
+                max_qty = max(float(loc_items["quantity"].max()), 1.0) if not loc_items.empty and "quantity" in loc_items.columns else 1.0
+
                 for _, unit in loc_units.iterrows():
                     uid        = unit["id"]
                     uname      = unit.get("name", "Unit")
@@ -1242,67 +1251,77 @@ def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFr
                         else pd.DataFrame()
                     )
                     ucount = len(unit_items)
+                    uqty   = float(unit_items["quantity"].sum()) if not unit_items.empty else 0.0
+                    pct    = min(uqty / max_qty * 100, 100.0)
+                    bar_color = "#ef4444" if pct < 20 else "#f59e0b" if pct < 50 else "#14b8a6"
 
-                    col_hdr, col_edit, col_del = st.columns([5, 1, 1])
-                    with col_hdr:
-                        st.markdown(f"**{_esc(uicon)} {_esc(uname)}** — {ucount} item{'s' if ucount != 1 else ''}")
-                    with col_edit:
-                        if st.button("✏️", key=f"edit_unit_{uid}", help="Edit unit"):
-                            dialog_edit_unit(unit.to_dict())
-                    with col_del:
-                        if st.button("🗑️", key=f"del_unit_{uid}", help="Delete unit"):
-                            dialog_delete_unit(uid, uname)
-
-                    with st.expander(f"View items in {uicon} {uname}", expanded=False):
-                        if unit_items.empty:
-                            st.caption("No items in this unit yet.")
-                        else:
-                            for _, item in unit_items.iterrows():
-                                unit_str = item.get("custom_unit") or ""
-                                qty      = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
-                                st.markdown(f"- **{item['item_name']}** — {qty} {unit_str}".strip())
+                    col_info, col_btns = st.columns([5, 2])
+                    with col_info:
+                        st.markdown(
+                            f"""
+                            <div style="margin:6px 0 0 0">
+                              <span style="font-size:1.1rem">{_esc(uicon)}</span>
+                              <span style="font-weight:600;font-size:0.92rem;margin-left:6px">{_esc(uname)}</span>
+                              <span style="background:#e2e8f0;border-radius:12px;padding:1px 8px;
+                                           font-size:0.72rem;font-weight:700;margin-left:6px;color:#475569">
+                                {ucount}
+                              </span>
+                            </div>
+                            <div class="unit-bar-track">
+                              <div style="background:{bar_color};width:{pct:.0f}%;height:5px;border-radius:4px;"></div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    with col_btns:
+                        cb_e, cb_d = st.columns(2)
+                        with cb_e:
+                            if st.button("✏️", key=f"edit_unit_{uid}", help="Edit unit"):
+                                dialog_edit_unit(unit.to_dict())
+                        with cb_d:
+                            if st.button("🗑️", key=f"del_unit_{uid}", help="Delete unit"):
+                                dialog_delete_unit(uid, uname)
 
                 st.divider()
 
-            # ── Items directly in room (no unit) ──────────────────────
+            # ── Directly in room ─────────────────────────────────────
             with st.expander(
-                f"🏠 Directly in room ({len(direct_items)} item{'s' if len(direct_items) != 1 else ''})",
-                expanded=False,
+                f"🏠 Directly in room ({len(direct_items)})",
+                expanded=(loc_units.empty if not loc_units.empty else True),
             ):
                 if direct_items.empty:
                     st.caption("No items placed directly in this room.")
                 else:
                     for _, item in direct_items.iterrows():
                         unit_str = item.get("custom_unit") or ""
-                        qty      = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
-                        st.markdown(f"- **{item['item_name']}** — {qty} {unit_str}".strip())
+                        qty_fmt  = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
+                        st.markdown(f"- **{item['item_name']}** — {qty_fmt} {unit_str}".strip())
 
             st.divider()
 
-            # ── Add unit + Edit/Delete location buttons ────────────────
-            btn_add_unit, btn_edit, btn_del = st.columns(3)
-            with btn_add_unit:
-                if st.button("➕ Add Unit", key=f"add_unit_{loc_id}", use_container_width=True):
+            # ── Action buttons ────────────────────────────────────────
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("➕ Unit", key=f"add_unit_{loc_id}", use_container_width=True):
                     dialog_add_unit(loc_id, name)
-            with btn_edit:
+            with b2:
                 if st.button("✏️ Edit", key=f"edit_loc_{loc_id}", use_container_width=True):
                     dialog_edit_location(loc)
-            with btn_del:
-                if st.button("🗑️ Delete", key=f"del_loc_{loc_id}", use_container_width=True):
+            with b3:
+                if st.button("🗑️", key=f"del_loc_{loc_id}", use_container_width=True):
                     dialog_delete_location(loc_id, name)
 
 
 def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
-    """
-    Card-grid home overview.
-    Each card = one location; clicking ▾ expands the item list in place.
-    Below the grid: flat summary table of all items across all locations.
-    """
+    # ── Page header ───────────────────────────────────────────────────────
     col_hdr, col_add = st.columns([5, 1])
     with col_hdr:
-        st.subheader("🏠 Home Overview")
+        st.markdown(
+            "<h1 style='font-size:2.4rem;font-weight:800;margin:0 0 4px 0'>Locations</h1>",
+            unsafe_allow_html=True,
+        )
     with col_add:
-        if st.button("📍 Add Location", type="primary", use_container_width=True):
+        if st.button("➕ Add Location", type="primary", use_container_width=True):
             dialog_add_location()
 
     if locations_df.empty:
@@ -1315,73 +1334,67 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
 
     locs = locations_df.to_dict("records")
 
-    # Card grid
-    for row_start in range(0, len(locs), _CARDS_PER_ROW):
-        row_locs = locs[row_start : row_start + _CARDS_PER_ROW]
-        cols     = st.columns(_CARDS_PER_ROW)
-
+    # ── Card grid (3 per row) ─────────────────────────────────────────────
+    for row_start in range(0, len(locs), CARDS_PER_ROW):
+        row_locs = locs[row_start: row_start + CARDS_PER_ROW]
+        cols     = st.columns(CARDS_PER_ROW)
         for col, loc in zip(cols, row_locs):
-            if not df.empty and "location_id" in df.columns:
-                loc_items = df[df["location_id"] == loc["id"]].copy()
-            else:
-                loc_items = pd.DataFrame()
-            loc_units = (
-                units_df[units_df["location_id"] == loc["id"]].copy()
-                if not units_df.empty else pd.DataFrame()
-            )
+            loc_id    = loc.get("id")
+            loc_items = df[df["location_id"] == loc_id].copy() if not df.empty and "location_id" in df.columns else pd.DataFrame()
+            loc_units = units_df[units_df["location_id"] == loc_id].copy() if not units_df.empty else pd.DataFrame()
             _location_card(col, loc, loc_items, loc_units)
 
-        st.write("")  # Row spacing
+        st.write("")  # row spacing
 
-    # Unassigned items
+    # ── Unassigned items ──────────────────────────────────────────────────
     if not df.empty and "location_id" in df.columns:
         unassigned = df[df["location_id"].isna()].copy()
         if not unassigned.empty:
             st.divider()
-            with st.expander(
-                f"📦 Unassigned Items ({len(unassigned)})", expanded=False
-            ):
+            with st.expander(f"📦 Unassigned Items ({len(unassigned)})", expanded=False):
                 for _, item in unassigned.iterrows():
                     unit = item.get("custom_unit") or ""
                     qty  = f"{item['quantity']:.0f}"
-                    st.markdown(f"• **{item['item_name']}** — {qty} {unit}".strip())
+                    st.markdown(f"- **{item['item_name']}** — {qty} {unit}".strip())
 
-    # Summary table
-    st.divider()
-    st.subheader("📋 All Items by Location")
+    # ── Nested summary table ──────────────────────────────────────────────
+    if not df.empty:
+        st.divider()
+        st.markdown("**All Items by Location & Storage Unit**")
 
-    if df.empty:
-        st.info("No inventory items yet.")
-        return
+        loc_lookup  = {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")} if not locations_df.empty else {}
+        unit_lookup = {r["id"]: f"{r['icon']} {r['name']}" for r in units_df.to_dict("records")}     if not units_df.empty else {}
 
-    loc_lookup = (
-        {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
-        if not locations_df.empty
-        else {}
-    )
+        summary = df[["item_name", "quantity", "custom_unit", "location_id", "unit_id", "updated_at"]].copy()
+        summary["Location"]     = summary["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+        summary["Storage Unit"] = summary["unit_id"].map(unit_lookup).fillna("— In Room —")
+        summary = (
+            summary.drop(columns=["location_id", "unit_id"])
+            .rename(columns={
+                "item_name":   "Item",
+                "quantity":    "Quantity",
+                "custom_unit": "Unit",
+                "updated_at":  "Last Updated",
+            })
+            .sort_values(["Location", "Storage Unit", "Item"])
+            .reset_index(drop=True)
+        )
+        max_qty = max(float(df["quantity"].max()), 1.0)
 
-    summary = df[
-        ["item_name", "quantity", "custom_unit", "location_id", "updated_at"]
-    ].copy()
-    summary["Location"] = summary["location_id"].map(loc_lookup).fillna("📦 Unassigned")
-    summary = summary.drop(columns=["location_id"])
-    summary = summary.rename(columns={
-        "item_name":   "Item",
-        "quantity":    "Quantity",
-        "custom_unit": "Unit",
-        "updated_at":  "Last Updated",
-    })
-    summary = summary.sort_values(["Location", "Item"]).reset_index(drop=True)
+        st.dataframe(
+            summary[["Location", "Storage Unit", "Item", "Quantity", "Unit", "Last Updated"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Quantity": st.column_config.ProgressColumn(
+                    "Qty", min_value=0, max_value=max_qty, format="%.0f"
+                ),
+                "Last Updated": st.column_config.DatetimeColumn(
+                    "Last Updated", format="DD/MM/YYYY"
+                ),
+            },
+        )
 
-    st.dataframe(
-        summary[["Location", "Item", "Quantity", "Unit", "Last Updated"]],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Quantity":     st.column_config.NumberColumn(format="%.2f"),
-            "Last Updated": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
-        },
-    )
 
 @st.dialog("➕ Add Maintenance Task", width="large")
 def dialog_add_maintenance_task(inventory_df: pd.DataFrame) -> None:
@@ -1691,172 +1704,282 @@ def render_maintenance(maintenance_df: pd.DataFrame, df: pd.DataFrame) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 13.  DASHBOARD TAB
 # ─────────────────────────────────────────────────────────────────────────────
-def render_dashboard(
-    df: pd.DataFrame,
-    prefs: dict,
-    locations_df: pd.DataFrame,
-    maintenance_df: pd.DataFrame,
-) -> None:
-    layout: dict = prefs.get("dashboard_layout", {})
+def _kpi_card(col, label: str, value: str, icon: str, accent: str, bg: str) -> None:
+    with col:
+        st.markdown(
+            f"""
+            <div class="kpi-card" style="background:{bg};border-left:4px solid {accent};">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div>
+                  <p style="color:#94a3b8;font-size:0.75rem;font-weight:700;
+                             text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px 0">
+                    {_esc(label)}
+                  </p>
+                  <p style="color:#f1f5f9;font-size:2.4rem;font-weight:800;margin:0;line-height:1.1">
+                    {_esc(value)}
+                  </p>
+                </div>
+                <span style="font-size:2.2rem;opacity:0.75;padding-top:4px">{icon}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
+def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame, maintenance_df: pd.DataFrame) -> None:
+    layout     = dict(prefs.get("dashboard_layout", {}))
     loc_lookup = (
         {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
         if not locations_df.empty else {}
     )
 
-    # ── KPI Metrics ───────────────────────────────────────────────────────
-    st.subheader("📊 Key Metrics")
-    total_items:    int   = len(df)
-    total_quantity: float = float(df["quantity"].sum()) if not df.empty else 0.0
-    low_stock:      int   = int((df["quantity"] < 5).sum()) if not df.empty else 0
+    if df.empty:
+        render_empty_state(
+            "Your inventory is empty — add items in the Inventory tab!",
+            "➕ Add First Item",
+            dialog_add_item,
+        )
+        return
 
-    active: list[tuple] = []
-    if layout.get("show_total_items", True):
-        active.append(("Total Distinct Items", total_items, None))
-    if layout.get("show_total_quantity", True):
-        active.append(("Total Aggregate Quantity", f"{total_quantity:,.1f}", None))
-    if layout.get("show_low_stock", True):
-        active.append(("⚠️ Low Stock (qty < 5)", low_stock,
-                        "items need restocking" if low_stock else "All stocked"))
+    # ── KPIs ──────────────────────────────────────────────────────────────
+    total_items    = len(df)
+    total_quantity = float(df["quantity"].sum())
+    low_stock      = int((df["quantity"] < 5).sum())
+    total_value    = float(
+        pd.to_numeric(df.get("estimated_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    )
 
-    if active:
-        for col, (label, value, help_text) in zip(st.columns(len(active)), active):
-            with col:
-                st.metric(label=label, value=value, help=help_text)
-    else:
-        st.info("All metrics are hidden. Enable them in ⚙️ Settings.")
+    c1, c2, c3, c4 = st.columns(4)
+    _kpi_card(c1, "Total Items",    str(total_items),         "🏠", "#14b8a6", "#0a2826")
+    _kpi_card(c2, "Total Quantity", f"{total_quantity:,.0f}", "📦", "#3b82f6", "#0d1f3c")
+    _kpi_card(c3, "Low Stock",      str(low_stock),           "⚠️", "#ef4444", "#3c0d0d")
+    _kpi_card(c4, "Total Value",    f"£{total_value:,.0f}",   "💷", "#22c55e", "#0d2e1a")
+    st.divider()
+
+    # ── Charts row ────────────────────────────────────────────────────────
+    col_bar, col_donut = st.columns([3, 2])
+
+    with col_bar:
+        st.markdown("**Quantity by Item**")
+        chart_df = (
+            df[["item_name", "quantity"]]
+            .groupby("item_name")["quantity"]
+            .sum()
+            .reset_index()
+            .sort_values("quantity", ascending=False)
+            .head(10)
+        )
+        chart_df.columns = ["Item", "Quantity"]
+        selection = alt.selection_point(fields=["Item"])
+        bar = (
+            alt.Chart(chart_df)
+            .mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5)
+            .encode(
+                y=alt.Y("Item:N", sort="-x", axis=alt.Axis(labelLimit=150)),
+                x=alt.X("Quantity:Q", title="Quantity"),
+                color=alt.condition(
+                    selection,
+                    alt.value("#14b8a6"),
+                    alt.value("#1e4a44"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Item:N", title="Item"),
+                    alt.Tooltip("Quantity:Q", title="Qty", format=".0f"),
+                ],
+            )
+            .add_params(selection)
+            .properties(height=340)
+        )
+        chart_event = st.altair_chart(bar, theme="streamlit", use_container_width=True, on_select="rerun", key="dash_bar_chart")
+        if chart_event:
+            st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
+
+    with col_donut:
+        st.markdown("**Spending by Category**")
+        if "estimated_value" in df.columns:
+            spend = (
+                df[df["estimated_value"] > 0]
+                .groupby("category")["estimated_value"]
+                .sum()
+                .reset_index()
+                .rename(columns={"category": "Category", "estimated_value": "Value"})
+            )
+        else:
+            spend = pd.DataFrame()
+
+        if not spend.empty:
+            fig_donut = px.pie(
+                spend, names="Category", values="Value",
+                hole=0.52,
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_donut.update_traces(textposition="outside", textinfo="label+percent")
+            fig_donut.update_layout(
+                height=340,
+                margin=dict(t=20, b=40, l=10, r=10),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=-0.35, font_size=11),
+                annotations=[dict(
+                    text=f"£{spend['Value'].sum():,.0f}",
+                    x=0.5, y=0.5, font_size=17, showarrow=False,
+                    font_color="#f1f5f9",
+                )],
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_donut, use_container_width=True)
+        else:
+            st.caption("No asset values recorded yet.")
 
     st.divider()
 
-    if df.empty:
-        st.info("📭 Your inventory is empty — add items in the 📦 Inventory tab!")
-        return
+    # ── All Items by Location ─────────────────────────────────────────────
+    st.markdown("**All Items by Location**")
+    max_qty  = max(float(df["quantity"].max()), 1.0)
+    summary  = df[["item_name", "quantity", "custom_unit", "location_id", "updated_at"]].copy()
+    summary["Location"] = summary["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+    summary = (
+        summary.drop(columns=["location_id"])
+        .rename(columns={
+            "item_name":   "Item",
+            "quantity":    "Quantity",
+            "custom_unit": "Unit",
+            "updated_at":  "Last Updated",
+        })
+        .sort_values(["Location", "Item"])
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        summary[["Location", "Item", "Quantity", "Unit", "Last Updated"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Quantity": st.column_config.ProgressColumn(
+                "Quantity", min_value=0, max_value=max_qty, format="%.0f"
+            ),
+            "Last Updated": st.column_config.DatetimeColumn(
+                "Last Updated", format="DD/MM/YYYY HH:mm"
+            ),
+        },
+    )
+    st.divider()
 
-    # ── Alerts Tier: Expiry Radar + Maintenance ───────────────────────────
+    # ── Low Stock ─────────────────────────────────────────────────────────
+    st.markdown("**Low Stock Items**")
+    st.caption("Items where current quantity ≤ min_threshold.")
+    if "min_threshold" in df.columns:
+        low = df[df["min_threshold"].notna() & (df["quantity"] <= df["min_threshold"])].copy()
+    else:
+        low = pd.DataFrame()
+
+    if low.empty:
+        st.success("All items are above their minimum threshold.")
+    else:
+        low["Location"] = low["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+        low["Deficit"]      = (low["min_threshold"] - low["quantity"]).clip(lower=0)
+        low["Est. Budget"]  = (low["Deficit"] * low["unit_cost"].fillna(0)).round(2)
+        display_low = (
+            low[["item_name", "category", "Location", "quantity", "min_threshold", "Deficit", "Est. Budget"]]
+            .rename(columns={
+                "item_name":     "Item",
+                "category":      "Category",
+                "quantity":      "Current Qty",
+                "min_threshold": "Min. Threshold",
+            })
+        )
+        st.dataframe(display_low, use_container_width=True, hide_index=True, column_config={
+            "Est. Budget": st.column_config.NumberColumn(format="£%.2f"),
+        })
+        st.metric("Estimated Restock Budget", f"£{low['Est. Budget'].sum():,.2f}")
+    st.divider()
+
+    # ── Alerts row ────────────────────────────────────────────────────────
     col_expiry, col_maint = st.columns(2)
     today = pd.Timestamp.now(tz="UTC").normalize()
     in_30 = today + pd.Timedelta(days=30)
 
     with col_expiry:
-        st.markdown("### 🚨 Expiry Radar — 30 Days")
+        st.markdown("⏰ **Expiry Radar — 30 Days**")
         if "expiry_date" in df.columns:
             exp = df[df["expiry_date"].notna()].copy()
             exp["expiry_date"] = pd.to_datetime(exp["expiry_date"], utc=True, errors="coerce")
             exp = exp[(exp["expiry_date"] >= today) & (exp["expiry_date"] <= in_30)].sort_values("expiry_date")
         else:
             exp = pd.DataFrame()
-
         if exp.empty:
-            st.success("✅ Nothing expiring in 30 days.")
+            st.success("Nothing expiring in 30 days.")
         else:
-            st.warning(f"⚠️ {len(exp)} item(s) expiring soon.")
+            st.warning(f"{len(exp)} items expiring soon.")
             r = exp[["item_name", "expiry_date", "quantity"]].copy()
             r["Days Left"] = (r["expiry_date"] - today).dt.days
             r = r.rename(columns={"item_name": "Item", "expiry_date": "Expires", "quantity": "Qty"})
-            st.dataframe(r, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Expires":    st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
-                             "Days Left":  st.column_config.NumberColumn(format="%d d"),
-                         })
+            st.dataframe(r, use_container_width=True, hide_index=True, column_config={
+                "Expires":   st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+                "Days Left": st.column_config.NumberColumn(format="%d d"),
+            })
 
     with col_maint:
-        st.markdown("### 🔧 Maintenance Alerts")
+        st.markdown("🔧 **Maintenance Alerts**")
         if maintenance_df.empty:
             st.info("No maintenance tasks set up yet.")
         else:
-            m = maintenance_df.copy()
-            m["next_due_ts"] = pd.to_datetime(m["next_due"], utc=True, errors="coerce")
-            overdue = m[m["next_due_ts"] < today].copy()
-            due_soon = m[(m["next_due_ts"] >= today) & (m["next_due_ts"] <= today + pd.Timedelta(days=7))].copy()
-
+            m_ts      = pd.to_datetime(maintenance_df["next_due"], utc=True, errors="coerce")
+            overdue   = maintenance_df[m_ts < today]
+            due_soon  = maintenance_df[(m_ts >= today) & (m_ts <= today + pd.Timedelta(days=7))]
             if overdue.empty and due_soon.empty:
-                st.success("✅ No overdue or upcoming maintenance.")
+                st.success("No overdue or upcoming maintenance.")
             else:
                 if not overdue.empty:
-                    st.error(f"🔴 {len(overdue)} overdue task(s)")
+                    st.error(f"{len(overdue)} overdue task(s)")
                     for _, t in overdue.iterrows():
-                        st.markdown(f"- **{t['task_name']}** — due {t['next_due']}")
+                        st.markdown(f"- {t['task_name']} — due {t['next_due']}")
                 if not due_soon.empty:
-                    st.warning(f"🟡 {len(due_soon)} task(s) due within 7 days")
+                    st.warning(f"{len(due_soon)} due within 7 days")
                     for _, t in due_soon.iterrows():
-                        st.markdown(f"- **{t['task_name']}** — due {t['next_due']}")
-
+                        st.markdown(f"- {t['task_name']} — due {t['next_due']}")
     st.divider()
 
-    # ── Financial Tier ────────────────────────────────────────────────────
-    st.subheader("💷 Financial Overview")
-
-    sunk_cost   = 0.0
-    asset_value = 0.0
-
+    # ── Financial Overview ────────────────────────────────────────────────
+    st.markdown("**Financial Overview**")
+    sunk_cost = asset_value = 0.0
     if not df.empty:
-        cons = df[df["category"].isin(_EXPIRY_CATS)].copy()
-        if "unit_cost" in cons.columns:
-            cons["unit_cost"] = pd.to_numeric(cons["unit_cost"], errors="coerce").fillna(0)
-            sunk_cost = float((cons["quantity"] * cons["unit_cost"]).sum())
+        cons = df[df["category"].isin(EXPIRY_CATS)].copy()
+        cons["unit_cost"] = pd.to_numeric(cons.get("unit_cost", pd.Series(dtype=float)), errors="coerce").fillna(0)
+        sunk_cost   = float((cons["quantity"] * cons["unit_cost"]).sum())
+        durable     = df[df["category"].isin(DURABLE_CATS)].copy()
+        asset_value = float(pd.to_numeric(durable.get("estimated_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
 
-        durable = df[df["category"].isin(_DURABLE_CATS)].copy()
-        if "estimated_value" in durable.columns:
-            asset_value = float(pd.to_numeric(durable["estimated_value"], errors="coerce").fillna(0).sum())
+    cf1, cf2 = st.columns(2)
+    with cf1:
+        st.metric("Sunk Cost (Consumables/Toiletries)", f"£{sunk_cost:,.2f}",
+                  help="Sum of quantity × unit_cost for perishable categories.")
+    with cf2:
+        st.metric("Asset Value (Durables)", f"£{asset_value:,.2f}",
+                  help="Sum of estimated_value for Electronics, Appliances, Valuables, Furniture.")
 
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        st.metric(
-            "🧴 Total Sunk Cost (Consumables/Toiletries)",
-            f"£{sunk_cost:,.2f}",
-            help="Sum of (quantity × unit_cost) for perishable categories.",
-        )
-    with col_f2:
-        st.metric(
-            "🏦 Total Asset Value (Durables)",
-            f"£{asset_value:,.2f}",
-            help="Sum of estimated_value for Electronics, Appliances, Valuables, Furniture.",
-        )
-
-    # Asset breakdown by location
-    if not df.empty and "estimated_value" in df.columns:
+    if "estimated_value" in df.columns:
         asset_df = df[df["estimated_value"].notna() & (df["estimated_value"] > 0)].copy()
         if not asset_df.empty:
             asset_df["Location"] = asset_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
             ledger = (
                 asset_df.groupby("Location")["estimated_value"]
                 .sum().reset_index()
-                .rename(columns={"estimated_value": "Total Value (£)"})
-                .sort_values("Total Value (£)", ascending=False)
+                .rename(columns={"estimated_value": "Total Value"})
+                .sort_values("Total Value", ascending=False)
             )
             fig_bar = px.bar(
-                ledger, x="Location", y="Total Value (£)", color="Location",
-                color_discrete_sequence=px.colors.qualitative.Set2, text_auto=".2s",
+                ledger, x="Location", y="Total Value",
+                color="Location",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                text_auto=".2s",
             )
-            fig_bar.update_layout(showlegend=False, height=280,
-                                  margin=dict(t=10, b=10, l=10, r=10), xaxis_title=None)
+            fig_bar.update_layout(
+                showlegend=False, height=260,
+                margin=dict(t=10, b=10, l=10, r=10), xaxis_title=None,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            )
             fig_bar.update_traces(textposition="outside")
             st.plotly_chart(fig_bar, use_container_width=True)
-
-    st.divider()
-
-    # ── Quantity by Item bar chart ────────────────────────────────────────
-    st.subheader("📊 Quantity by Item")
-    chart_df         = df[["item_name", "quantity"]].copy()
-    chart_df.columns = ["Item", "Quantity"]
-    selection        = alt.selection_point(fields=["Item"])
-
-    bar = (
-        alt.Chart(chart_df)
-        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
-        .encode(
-            x=alt.X("Item:N", sort="-y", axis=alt.Axis(labelAngle=-30, labelLimit=120)),
-            y=alt.Y("Quantity:Q"),
-            color=alt.condition(selection, alt.value("#4A90D9"), alt.value("#b8d4f0")),
-            tooltip=[alt.Tooltip("Item:N", title="Item"), alt.Tooltip("Quantity:Q", title="Qty", format=".2f")],
-        )
-        .add_params(selection)
-        .properties(height=350)
-    )
-    chart_event = st.altair_chart(bar, theme="streamlit", use_container_width=True,
-                                   on_select="rerun", key="altair_bar_chart")
-    if chart_event:
-        st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
