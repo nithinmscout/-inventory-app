@@ -1,14 +1,4 @@
 
-#git config --global user.name "nithinmscout"
-#git config --global user.email "nithinm.pitchside@gmail.com"
-
-#git add .
-#git commit -m "Add home tab with location card grid and locations table"
-#git push origin main
-
-#SUPABASE_URL = "https://qfboehwxfliabbrzdvls.supabase.co"
-#SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmYm9laHd4ZmxpYWJicnpkdmxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5MDk3NDQsImV4cCI6MjA4ODQ4NTc0NH0.Zh6vHvsg7eUxayBqCjfNMu2X_Pwa9pZd9ZcWPsCbK1U"
-
 # =============================================================================
 # app.py  —  Multi-Tenant Inventory Management System
 # Stack   : Streamlit (frontend) + Supabase PostgreSQL (backend)
