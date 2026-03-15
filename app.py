@@ -105,7 +105,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 def _esc(value: str) -> str:
     """HTML-escape any user-supplied string before injecting into markup."""
-    return _html.escape(str(value or ""), quote=True)
+    return html.escape(str(value or ""), quote=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  SUPABASE CLIENT
