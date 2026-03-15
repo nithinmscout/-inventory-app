@@ -254,27 +254,28 @@ def fetch_inventory() -> pd.DataFrame:
             supabase.table("inventory")
             .select(
                 "id, item_name, category, quantity, custom_unit, description, "
-                "expiry_date, estimated_value, warranty_until, "
-                "location_id, created_at, updated_at"
+                "expiry_date, estimated_value, warranty_until, unit_cost, "
+                "min_threshold, location_id, created_at, updated_at"
             )
             .order("created_at", desc=True)
             .execute()
         )
         if resp.data:
             df = pd.DataFrame(resp.data)
-            df["quantity"]         = pd.to_numeric(df["quantity"],         errors="coerce").fillna(0)
-            df["estimated_value"]  = pd.to_numeric(df["estimated_value"],  errors="coerce")
-            df["expiry_date"]      = pd.to_datetime(df["expiry_date"],     errors="coerce")
-            df["warranty_until"]   = pd.to_datetime(df["warranty_until"],  errors="coerce")
+            for col in ["quantity", "estimated_value", "unit_cost", "min_threshold"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df["expiry_date"]    = pd.to_datetime(df["expiry_date"],   errors="coerce")
+            df["warranty_until"] = pd.to_datetime(df["warranty_until"], errors="coerce")
             return df
         return pd.DataFrame(columns=[
-            "id", "item_name", "category", "quantity", "custom_unit",
-            "description", "expiry_date", "estimated_value",
-            "warranty_until", "location_id", "created_at", "updated_at",
+            "id", "item_name", "category", "quantity", "custom_unit", "description",
+            "expiry_date", "estimated_value", "warranty_until", "unit_cost",
+            "min_threshold", "location_id", "created_at", "updated_at",
         ])
     except Exception as exc:
         st.error(f"Failed to load inventory: {exc}")
         return pd.DataFrame()
+
 
 
 def fetch_locations() -> pd.DataFrame:
@@ -340,6 +341,53 @@ def upsert_preferences(prefs: dict) -> bool:
         st.error(f"Failed to save preferences: {exc}")
         return False
 
+def fetch_shopping_history() -> pd.DataFrame:
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("shopping_history")
+            .select("id, item_name, category, quantity_bought, total_price_paid, purchase_date, created_at")
+            .order("purchase_date", desc=True)
+            .execute()
+        )
+        if resp.data:
+            df = pd.DataFrame(resp.data)
+            df["quantity_bought"]  = pd.to_numeric(df["quantity_bought"],  errors="coerce").fillna(0)
+            df["total_price_paid"] = pd.to_numeric(df["total_price_paid"], errors="coerce").fillna(0)
+            df["purchase_date"]    = pd.to_datetime(df["purchase_date"],   errors="coerce")
+            return df
+        return pd.DataFrame(columns=[
+            "id", "item_name", "category", "quantity_bought",
+            "total_price_paid", "purchase_date", "created_at",
+        ])
+    except Exception as exc:
+        st.error(f"Failed to load shopping history: {exc}")
+        return pd.DataFrame()
+
+
+def fetch_maintenance_tasks() -> pd.DataFrame:
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("maintenance_tasks")
+            .select("id, inventory_id, task_name, frequency_days, last_completed, next_due, created_at")
+            .order("next_due", desc=False)
+            .execute()
+        )
+        if resp.data:
+            df = pd.DataFrame(resp.data)
+            df["frequency_days"] = pd.to_numeric(df["frequency_days"], errors="coerce").fillna(30).astype(int)
+            df["last_completed"] = pd.to_datetime(df["last_completed"], errors="coerce")
+            df["next_due"]       = pd.to_datetime(df["next_due"],       errors="coerce")
+            return df
+        return pd.DataFrame(columns=[
+            "id", "inventory_id", "task_name", "frequency_days",
+            "last_completed", "next_due", "created_at",
+        ])
+    except Exception as exc:
+        st.error(f"Failed to load maintenance tasks: {exc}")
+        return pd.DataFrame()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8.  LOCATION COLOUR PALETTE
@@ -364,10 +412,12 @@ _CATEGORIES = [
     "Valuables",
     "Furniture",
     "Clothing",
-    "Other",
+    "Other / Custom",
 ]
 _EXPIRY_CATS   = {"Consumables", "Toiletries"}
 _WARRANTY_CATS = {"Electronics", "Appliances", "Valuables"}
+_DURABLE_CATS  = {"Electronics", "Appliances", "Valuables", "Furniture"}
+
 
 # ── Default locations seeded for every new user ───────────────────────────────
 _DEFAULT_LOCATIONS = [
@@ -576,7 +626,14 @@ def dialog_add_item() -> None:
     with col_a:
         item_name = st.text_input("Item Name *", placeholder="e.g. Rice Bag")
     with col_b:
-        category = st.selectbox("Category *", options=_CATEGORIES)
+        category_raw = st.selectbox("Category *", options=_CATEGORIES)
+
+    # Custom category input
+    if category_raw == "Other / Custom":
+        custom_cat = st.text_input("Custom Category Name *", placeholder="e.g. Pet Supplies")
+        category   = custom_cat.strip() if custom_cat.strip() else "Other"
+    else:
+        category = category_raw
 
     col_c, col_d = st.columns(2)
     with col_c:
@@ -589,9 +646,23 @@ def dialog_add_item() -> None:
         loc_label   = st.selectbox("Location", options=list(loc_options.keys()))
         location_id = loc_options[loc_label]
     with col_f:
+        min_threshold = st.number_input(
+            "Min. Threshold", min_value=0.0, step=1.0, value=0.0,
+            help="Alert in Procurement tab when quantity falls at or below this."
+        )
+
+    col_g, col_h = st.columns(2)
+    with col_g:
+        unit_cost = st.number_input(
+            "Unit Cost (£)", min_value=0.0, step=0.01, value=0.0,
+            help="Cost per unit — used for budget estimates and sunk cost calculations."
+        )
+        if unit_cost == 0.0:
+            unit_cost = None
+    with col_h:
         st.empty()
 
-    # ── Conditional fields based on category ─────────────────────────────
+    # ── Conditional fields ────────────────────────────────────────────────
     expiry_date     = None
     estimated_value = None
     warranty_until  = None
@@ -600,8 +671,7 @@ def dialog_add_item() -> None:
         st.divider()
         st.caption("🗓️ Perishable fields")
         expiry_date = st.date_input(
-            "Expiry Date",
-            value=None,
+            "Expiry Date", value=None,
             min_value=datetime.now(timezone.utc).date(),
             help="Leave blank if not applicable.",
         )
@@ -613,14 +683,13 @@ def dialog_add_item() -> None:
         with col_v:
             estimated_value = st.number_input(
                 "Estimated Value (£)", min_value=0.0, step=1.0, value=0.0,
-                help="Used for insurance ledger calculations."
+                help="Used for insurance ledger."
             )
             if estimated_value == 0.0:
                 estimated_value = None
         with col_w:
             warranty_until = st.date_input(
-                "Warranty Until",
-                value=None,
+                "Warranty Until", value=None,
                 min_value=datetime.now(timezone.utc).date(),
             )
 
@@ -628,31 +697,34 @@ def dialog_add_item() -> None:
 
     st.divider()
     col_save, col_cancel = st.columns(2)
-
     with col_save:
         if st.button("💾 Save Item", type="primary", use_container_width=True):
             if not item_name.strip():
                 st.error("Item Name is required.")
                 return
+            if category_raw == "Other / Custom" and not category.strip():
+                st.error("Please enter a custom category name.")
+                return
             try:
                 _set_postgrest_auth()
                 supabase.table("inventory").insert({
-                    "user_id":          st.session_state["user_id"],
-                    "item_name":        item_name.strip(),
-                    "category":         category,
-                    "quantity":         float(quantity),
-                    "custom_unit":      custom_unit.strip() or None,
-                    "description":      description.strip() or None,
-                    "location_id":      location_id,
-                    "expiry_date":      expiry_date.isoformat() if expiry_date else None,
-                    "estimated_value":  estimated_value,
-                    "warranty_until":   warranty_until.isoformat() if warranty_until else None,
+                    "user_id":         st.session_state["user_id"],
+                    "item_name":       item_name.strip(),
+                    "category":        category,
+                    "quantity":        float(quantity),
+                    "custom_unit":     custom_unit.strip() or None,
+                    "description":     description.strip() or None,
+                    "location_id":     location_id,
+                    "unit_cost":       unit_cost,
+                    "min_threshold":   float(min_threshold),
+                    "expiry_date":     expiry_date.isoformat() if expiry_date else None,
+                    "estimated_value": estimated_value,
+                    "warranty_until":  warranty_until.isoformat() if warranty_until else None,
                 }).execute()
                 st.toast("✅ Item added!", icon="📦")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Failed to add item: {exc}")
-
     with col_cancel:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
@@ -674,14 +746,26 @@ def dialog_edit_item(row: dict) -> None:
     loc_keys          = list(loc_options.keys())
     loc_index         = loc_keys.index(current_loc_label) if current_loc_label in loc_keys else 0
 
+    # Handle custom category (not in preset list)
     current_cat = row.get("category") or _CATEGORIES[0]
-    cat_index   = _CATEGORIES.index(current_cat) if current_cat in _CATEGORIES else 0
+    if current_cat in _CATEGORIES:
+        cat_index      = _CATEGORIES.index(current_cat)
+        initial_custom = ""
+    else:
+        cat_index      = _CATEGORIES.index("Other / Custom")
+        initial_custom = current_cat
 
     col_a, col_b = st.columns(2)
     with col_a:
         item_name = st.text_input("Item Name *", value=row.get("item_name", ""))
     with col_b:
-        category = st.selectbox("Category *", options=_CATEGORIES, index=cat_index)
+        category_raw = st.selectbox("Category *", options=_CATEGORIES, index=cat_index)
+
+    if category_raw == "Other / Custom":
+        custom_cat = st.text_input("Custom Category Name *", value=initial_custom)
+        category   = custom_cat.strip() if custom_cat.strip() else "Other"
+    else:
+        category = category_raw
 
     col_c, col_d = st.columns(2)
     with col_c:
@@ -697,6 +781,20 @@ def dialog_edit_item(row: dict) -> None:
         loc_label   = st.selectbox("Location", options=loc_keys, index=loc_index)
         location_id = loc_options[loc_label]
     with col_f:
+        min_threshold = st.number_input(
+            "Min. Threshold", min_value=0.0, step=1.0,
+            value=float(row.get("min_threshold") or 0.0),
+        )
+
+    col_g, col_h = st.columns(2)
+    with col_g:
+        unit_cost = st.number_input(
+            "Unit Cost (£)", min_value=0.0, step=0.01,
+            value=float(row.get("unit_cost") or 0.0),
+        )
+        if unit_cost == 0.0:
+            unit_cost = None
+    with col_h:
         st.empty()
 
     # ── Conditional fields ────────────────────────────────────────────────
@@ -709,10 +807,8 @@ def dialog_edit_item(row: dict) -> None:
         st.caption("🗓️ Perishable fields")
         existing_expiry = row.get("expiry_date")
         if isinstance(existing_expiry, str):
-            try:
-                existing_expiry = datetime.fromisoformat(existing_expiry).date()
-            except Exception:
-                existing_expiry = None
+            try:    existing_expiry = datetime.fromisoformat(existing_expiry).date()
+            except: existing_expiry = None
         elif hasattr(existing_expiry, "date"):
             existing_expiry = existing_expiry.date()
         expiry_date = st.date_input("Expiry Date", value=existing_expiry)
@@ -722,13 +818,10 @@ def dialog_edit_item(row: dict) -> None:
         st.caption("💰 Asset fields")
         existing_warranty = row.get("warranty_until")
         if isinstance(existing_warranty, str):
-            try:
-                existing_warranty = datetime.fromisoformat(existing_warranty).date()
-            except Exception:
-                existing_warranty = None
+            try:    existing_warranty = datetime.fromisoformat(existing_warranty).date()
+            except: existing_warranty = None
         elif hasattr(existing_warranty, "date"):
             existing_warranty = existing_warranty.date()
-
         col_v, col_w = st.columns(2)
         with col_v:
             estimated_value = st.number_input(
@@ -746,7 +839,6 @@ def dialog_edit_item(row: dict) -> None:
 
     st.divider()
     col_update, col_cancel = st.columns(2)
-
     with col_update:
         if st.button("💾 Update Item", type="primary", use_container_width=True):
             if not item_name.strip():
@@ -755,26 +847,26 @@ def dialog_edit_item(row: dict) -> None:
             try:
                 _set_postgrest_auth()
                 supabase.table("inventory").update({
-                    "item_name":        item_name.strip(),
-                    "category":         category,
-                    "quantity":         float(quantity),
-                    "custom_unit":      custom_unit.strip() or None,
-                    "description":      description.strip() or None,
-                    "location_id":      location_id,
-                    "expiry_date":      expiry_date.isoformat() if expiry_date else None,
-                    "estimated_value":  estimated_value,
-                    "warranty_until":   warranty_until.isoformat() if warranty_until else None,
-                    "updated_at":       datetime.now(timezone.utc).isoformat(),
+                    "item_name":       item_name.strip(),
+                    "category":        category,
+                    "quantity":        float(quantity),
+                    "custom_unit":     custom_unit.strip() or None,
+                    "description":     description.strip() or None,
+                    "location_id":     location_id,
+                    "unit_cost":       unit_cost,
+                    "min_threshold":   float(min_threshold),
+                    "expiry_date":     expiry_date.isoformat() if expiry_date else None,
+                    "estimated_value": estimated_value,
+                    "warranty_until":  warranty_until.isoformat() if warranty_until else None,
+                    "updated_at":      datetime.now(timezone.utc).isoformat(),
                 }).eq("id", row["id"]).execute()
                 st.toast("✅ Item updated!", icon="✏️")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Update failed: {exc}")
-
     with col_cancel:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
-
 
 
 @st.dialog("🗑️ Confirm Deletion")
@@ -809,11 +901,50 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 11.  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
-def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
+def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
     with st.sidebar:
         st.markdown("## 📦 Inventory Manager")
         st.caption("Multi-tenant · Free Tier")
         st.divider()
+
+        # ── Global Search ─────────────────────────────────────────────────
+        search_query = st.text_input(
+            "🔍 Search inventory", placeholder="e.g. rice, lamp…",
+            label_visibility="collapsed",
+        )
+        if search_query.strip():
+            q = search_query.strip().lower()
+            if not df.empty:
+                hits = df[df["item_name"].str.lower().str.contains(q, na=False)].copy()
+            else:
+                hits = pd.DataFrame()
+
+            if hits.empty:
+                st.caption("No items match your search.")
+            else:
+                loc_lookup = (
+                    {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+                    if not locations_df.empty else {}
+                )
+                for _, hit in hits.iterrows():
+                    loc_label = loc_lookup.get(hit.get("location_id"), "📦 Unassigned")
+                    qty       = hit["quantity"]
+                    unit      = hit.get("custom_unit") or ""
+                    st.markdown(
+                        f"""
+                        <div style="background:#1e293b;border-left:3px solid #14b8a6;
+                                    border-radius:6px;padding:8px 12px;margin:4px 0;">
+                            <span style="color:#f1f5f9;font-weight:600;">
+                                {hit['item_name']}
+                            </span><br>
+                            <span style="color:#94a3b8;font-size:0.8rem;">
+                                {qty:.0f} {unit} · {loc_label}
+                            </span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            st.divider()
 
         email: str = st.session_state.get("user_email", "")
         uid: str   = st.session_state.get("user_id", "")
@@ -821,35 +952,19 @@ def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
         st.markdown("**Signed in as**")
         st.markdown(f"📧 `{email}`")
         st.markdown(f"🔑 `{uid[:8]}…`" if uid else "")
-
         st.divider()
 
         # ── Dashboard Settings ─────────────────────────────────────────────
         with st.expander("⚙️ Dashboard Settings", expanded=False):
             layout: dict = prefs.get("dashboard_layout", {})
-
-            show_items = st.toggle(
-                "Total Distinct Items",
-                value=layout.get("show_total_items", True),
-                key="s_show_items",
-            )
-            show_qty = st.toggle(
-                "Total Aggregate Quantity",
-                value=layout.get("show_total_quantity", True),
-                key="s_show_qty",
-            )
-            show_low = st.toggle(
-                "Low Stock Alerts",
-                value=layout.get("show_low_stock", True),
-                key="s_show_low",
-            )
+            show_items = st.toggle("Total Distinct Items",    value=layout.get("show_total_items", True),    key="s_show_items")
+            show_qty   = st.toggle("Total Aggregate Quantity", value=layout.get("show_total_quantity", True), key="s_show_qty")
+            show_low   = st.toggle("Low Stock Alerts",        value=layout.get("show_low_stock", True),      key="s_show_low")
 
             theme_options = ["system", "light", "dark"]
             current_theme = prefs.get("theme", "system")
             theme_index   = theme_options.index(current_theme) if current_theme in theme_options else 0
-            theme = st.selectbox(
-                "Theme", options=theme_options, index=theme_index, key="s_theme"
-            )
+            theme = st.selectbox("Theme", options=theme_options, index=theme_index, key="s_theme")
 
             if st.button("💾 Save Settings", type="primary", use_container_width=True):
                 new_prefs = {
@@ -873,13 +988,10 @@ def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
             st.markdown("**User ID:**")
             st.code(uid, language=None)
             st.caption("Your UUID is the RLS isolation key at the database level.")
-
             st.divider()
 
-            # ── Export CSV ─────────────────────────────────────────────────
             if not df.empty:
                 export_df = df.drop(columns=["id", "location_id"], errors="ignore").copy()
-                # Format dates for readability
                 for col in ["expiry_date", "warranty_until", "created_at", "updated_at"]:
                     if col in export_df.columns:
                         export_df[col] = pd.to_datetime(export_df[col], errors="coerce").dt.strftime("%d/%m/%Y")
@@ -895,14 +1007,8 @@ def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
                 st.caption("No data to export yet.")
 
             st.divider()
-
-            # ── Delete Account ─────────────────────────────────────────────
-            if st.button(
-                "🗑️ Delete My Account",
-                use_container_width=True,
-                type="primary",
-                help="Permanently deletes your account and all data.",
-            ):
+            if st.button("🗑️ Delete My Account", use_container_width=True, type="primary",
+                         help="Permanently deletes your account and all data."):
                 dialog_delete_account()
 
         st.divider()
@@ -917,6 +1023,7 @@ def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
 
         st.divider()
         st.caption("Built with Streamlit + Supabase")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
@@ -1084,16 +1191,327 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
         },
     )
 
+@st.dialog("➕ Add Maintenance Task", width="large")
+def dialog_add_maintenance_task(inventory_df: pd.DataFrame) -> None:
+    st.caption("Track recurring tasks like filter changes, appliance servicing, etc.")
+
+    task_name = st.text_input("Task Name *", placeholder="e.g. Replace HVAC filter")
+
+    item_options = {"— Not linked to an item —": None}
+    if not inventory_df.empty:
+        for _, r in inventory_df.iterrows():
+            item_options[r["item_name"]] = r["id"]
+    linked_item  = st.selectbox("Linked Inventory Item (optional)", options=list(item_options.keys()))
+    inventory_id = item_options[linked_item]
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        frequency_days = st.number_input("Repeat Every (days) *", min_value=1, step=1, value=30)
+    with col_b:
+        last_completed = st.date_input("Last Completed (optional)", value=None)
+
+    next_due_calc = None
+    if last_completed:
+        from datetime import timedelta
+        next_due_calc = last_completed + timedelta(days=int(frequency_days))
+        st.caption(f"📅 Next due: **{next_due_calc.strftime('%d/%m/%Y')}**")
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Task", type="primary", use_container_width=True):
+            if not task_name.strip():
+                st.error("Task Name is required.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.table("maintenance_tasks").insert({
+                    "user_id":        st.session_state["user_id"],
+                    "task_name":      task_name.strip(),
+                    "inventory_id":   inventory_id,
+                    "frequency_days": int(frequency_days),
+                    "last_completed": last_completed.isoformat() if last_completed else None,
+                    "next_due":       next_due_calc.isoformat() if next_due_calc else None,
+                }).execute()
+                st.toast("✅ Task added!", icon="🔧")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to add task: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+
+def render_procurement(
+    df: pd.DataFrame,
+    shopping_df: pd.DataFrame,
+    locations_df: pd.DataFrame,
+) -> None:
+    from datetime import timedelta
+
+    loc_lookup = (
+        {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+        if not locations_df.empty else {}
+    )
+
+    # ── Section A: Low Stock ──────────────────────────────────────────────
+    st.subheader("📉 Low Stock Items")
+    st.caption("Items where current quantity ≤ min_threshold.")
+
+    if not df.empty and "min_threshold" in df.columns:
+        low = df[df["quantity"] <= df["min_threshold"]].copy()
+        low = low[low["min_threshold"] > 0]   # ignore items with threshold = 0
+    else:
+        low = pd.DataFrame()
+
+    if low.empty:
+        st.success("✅ All items are above their minimum threshold.")
+    else:
+        low["Location"]  = low["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+        low["Deficit"]   = (low["min_threshold"] - low["quantity"]).clip(lower=0)
+        low["Est. Budget (£)"] = (low["Deficit"] * low["unit_cost"].fillna(0)).round(2)
+        display_low = low[["item_name", "category", "Location", "quantity",
+                            "min_threshold", "Deficit", "Est. Budget (£)"]].rename(columns={
+            "item_name":     "Item",
+            "category":      "Category",
+            "quantity":      "Current Qty",
+            "min_threshold": "Min. Threshold",
+        })
+        st.dataframe(display_low, use_container_width=True, hide_index=True,
+                     column_config={
+                         "Est. Budget (£)": st.column_config.NumberColumn(format="£%.2f"),
+                     })
+        total_budget = low["Est. Budget (£)"].sum()
+        st.metric("🛒 Estimated Trip Budget", f"£{total_budget:,.2f}")
+
+    st.divider()
+
+    # ── Section B: Log Receipt ────────────────────────────────────────────
+    st.subheader("🧾 Log a Purchase")
+
+    if df.empty:
+        st.info("Add items to your inventory first.")
+    else:
+        with st.form("log_receipt_form"):
+            item_names = sorted(df["item_name"].unique().tolist())
+            selected_item = st.selectbox("Item *", options=item_names)
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                qty_bought = st.number_input("Quantity Bought *", min_value=0.01, step=1.0, value=1.0)
+            with col_b:
+                total_paid = st.number_input("Total Price Paid (£) *", min_value=0.0, step=0.01, value=0.0)
+            with col_c:
+                purchase_date = st.date_input("Purchase Date", value=datetime.now(timezone.utc).date())
+
+            submitted = st.form_submit_button("💾 Log Receipt", type="primary", use_container_width=True)
+
+        if submitted:
+            if qty_bought <= 0:
+                st.error("Quantity must be greater than 0.")
+            else:
+                try:
+                    _set_postgrest_auth()
+                    # Get existing row
+                    item_row = df[df["item_name"] == selected_item].iloc[0]
+                    new_qty      = float(item_row["quantity"]) + float(qty_bought)
+                    new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else item_row.get("unit_cost")
+                    cat          = item_row.get("category") or "Other"
+
+                    # Update inventory quantity + unit_cost
+                    supabase.table("inventory").update({
+                        "quantity":   new_qty,
+                        "unit_cost":  new_unitcost,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", item_row["id"]).execute()
+
+                    # Insert shopping_history record
+                    supabase.table("shopping_history").insert({
+                        "user_id":          st.session_state["user_id"],
+                        "item_name":        selected_item,
+                        "category":         cat,
+                        "quantity_bought":  float(qty_bought),
+                        "total_price_paid": float(total_paid),
+                        "purchase_date":    purchase_date.isoformat(),
+                    }).execute()
+
+                    st.toast(f"✅ Logged purchase of {selected_item}!", icon="🧾")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to log receipt: {exc}")
+
+    st.divider()
+
+    # ── Section C: Spending Analytics ────────────────────────────────────
+    st.subheader("📊 Spending Analytics")
+
+    if shopping_df.empty:
+        st.info("No purchase history yet. Log a receipt above to see charts here.")
+        return
+
+    today_ts   = pd.Timestamp.now(tz="UTC").normalize()
+    thirty_ago = today_ts - pd.Timedelta(days=30)
+    recent     = shopping_df[
+        pd.to_datetime(shopping_df["purchase_date"], utc=True, errors="coerce") >= thirty_ago
+    ].copy()
+
+    col_pie, col_line = st.columns([1, 1])
+
+    with col_pie:
+        st.markdown("**Spending by Category — Last 30 Days**")
+        if recent.empty:
+            st.caption("No purchases in the last 30 days.")
+        else:
+            cat_spend = (
+                recent.groupby("category")["total_price_paid"]
+                .sum().reset_index()
+                .rename(columns={"category": "Category", "total_price_paid": "Spent (£)"})
+            )
+            fig_pie = px.pie(
+                cat_spend, names="Category", values="Spent (£)", hole=0.35,
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+            fig_pie.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10), showlegend=False)
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col_line:
+        st.markdown("**Unit Cost Over Time — Selected Item**")
+        item_list = sorted(shopping_df["item_name"].unique().tolist())
+        if item_list:
+            selected_line = st.selectbox("Item", options=item_list, key="line_item_select",
+                                         label_visibility="collapsed")
+            item_hist = shopping_df[shopping_df["item_name"] == selected_line].copy()
+            item_hist = item_hist[item_hist["quantity_bought"] > 0].copy()
+            item_hist["unit_cost_calc"] = item_hist["total_price_paid"] / item_hist["quantity_bought"]
+            item_hist = item_hist.sort_values("purchase_date")
+
+            if len(item_hist) < 2:
+                st.caption("Need at least 2 purchases to show a trend.")
+            else:
+                fig_line = px.line(
+                    item_hist, x="purchase_date", y="unit_cost_calc",
+                    markers=True,
+                    labels={"purchase_date": "Date", "unit_cost_calc": "Unit Cost (£)"},
+                    color_discrete_sequence=["#4A90D9"],
+                )
+                fig_line.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10))
+                st.plotly_chart(fig_line, use_container_width=True)
+
+def render_maintenance(maintenance_df: pd.DataFrame, df: pd.DataFrame) -> None:
+    from datetime import timedelta, date as date_type
+
+    col_hdr, col_add = st.columns([5, 1])
+    with col_hdr:
+        st.subheader("🔧 Maintenance Tasks")
+    with col_add:
+        if st.button("➕ Add Task", type="primary", use_container_width=True):
+            dialog_add_maintenance_task(df)
+
+    if maintenance_df.empty:
+        st.info("No maintenance tasks yet. Click ➕ Add Task to create one.")
+        return
+
+    today = pd.Timestamp.now(tz="UTC").normalize()
+
+    # Build display table
+    item_lookup = (
+        {r["id"]: r["item_name"] for r in df.to_dict("records")}
+        if not df.empty else {}
+    )
+
+    display = maintenance_df.copy()
+    display["Linked Item"]  = display["inventory_id"].map(item_lookup).fillna("—")
+    display["next_due_ts"]  = pd.to_datetime(display["next_due"], utc=True, errors="coerce")
+    display["Status"]       = display["next_due_ts"].apply(
+        lambda d: "🔴 Overdue" if pd.notna(d) and d < today
+        else ("🟡 Due Soon" if pd.notna(d) and d <= today + pd.Timedelta(days=7)
+              else "🟢 OK")
+    )
+    display["Days Until Due"] = (display["next_due_ts"] - today).dt.days
+
+    show_cols = display[["task_name", "Linked Item", "frequency_days",
+                          "last_completed", "next_due", "Days Until Due", "Status"]].rename(columns={
+        "task_name":       "Task",
+        "frequency_days":  "Every (days)",
+        "last_completed":  "Last Done",
+        "next_due":        "Next Due",
+    })
+
+    # Sort overdue first
+    show_cols = show_cols.sort_values("Days Until Due", na_position="last")
+
+    st.dataframe(
+        show_cols,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Last Done":     st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+            "Next Due":      st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+            "Days Until Due": st.column_config.NumberColumn(format="%d days"),
+        },
+    )
+
+    st.divider()
+
+    # ── Mark Complete ─────────────────────────────────────────────────────
+    st.markdown("#### ✅ Mark Task as Complete")
+    task_options = {r["task_name"]: r["id"] for r in maintenance_df.to_dict("records")}
+
+    col_sel, col_btn = st.columns([3, 1])
+    with col_sel:
+        chosen_task  = st.selectbox("Select task", options=list(task_options.keys()),
+                                    label_visibility="collapsed")
+    with col_btn:
+        if st.button("✅ Mark Done", type="primary", use_container_width=True):
+            task_id       = task_options[chosen_task]
+            task_row      = maintenance_df[maintenance_df["id"] == task_id].iloc[0]
+            freq          = int(task_row["frequency_days"])
+            completed_today = datetime.now(timezone.utc).date()
+            new_next_due    = completed_today + timedelta(days=freq)
+            try:
+                _set_postgrest_auth()
+                supabase.table("maintenance_tasks").update({
+                    "last_completed": completed_today.isoformat(),
+                    "next_due":       new_next_due.isoformat(),
+                }).eq("id", task_id).execute()
+                st.toast(f"✅ '{chosen_task}' marked complete. Next due: {new_next_due.strftime('%d/%m/%Y')}", icon="🔧")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Update failed: {exc}")
+
+    st.divider()
+
+    # ── Delete Task ───────────────────────────────────────────────────────
+    with st.expander("🗑️ Delete a Task", expanded=False):
+        del_task = st.selectbox("Task to delete", options=list(task_options.keys()), key="del_task_sel")
+        if st.button("🗑️ Delete", type="primary"):
+            try:
+                _set_postgrest_auth()
+                supabase.table("maintenance_tasks").delete().eq("id", task_options[del_task]).execute()
+                st.toast(f"🗑️ '{del_task}' deleted.", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Deletion failed: {exc}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 13.  DASHBOARD TAB
 # ─────────────────────────────────────────────────────────────────────────────
-def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) -> None:
+def render_dashboard(
+    df: pd.DataFrame,
+    prefs: dict,
+    locations_df: pd.DataFrame,
+    maintenance_df: pd.DataFrame,
+) -> None:
     layout: dict = prefs.get("dashboard_layout", {})
+
+    loc_lookup = (
+        {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+        if not locations_df.empty else {}
+    )
 
     # ── KPI Metrics ───────────────────────────────────────────────────────
     st.subheader("📊 Key Metrics")
-
     total_items:    int   = len(df)
     total_quantity: float = float(df["quantity"].sum()) if not df.empty else 0.0
     low_stock:      int   = int((df["quantity"] < 5).sum()) if not df.empty else 0
@@ -1104,14 +1522,11 @@ def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) 
     if layout.get("show_total_quantity", True):
         active.append(("Total Aggregate Quantity", f"{total_quantity:,.1f}", None))
     if layout.get("show_low_stock", True):
-        active.append((
-            "⚠️ Low Stock (qty < 5)", low_stock,
-            "items need restocking" if low_stock else "All stocked",
-        ))
+        active.append(("⚠️ Low Stock (qty < 5)", low_stock,
+                        "items need restocking" if low_stock else "All stocked"))
 
     if active:
-        metric_cols = st.columns(len(active))
-        for col, (label, value, help_text) in zip(metric_cols, active):
+        for col, (label, value, help_text) in zip(st.columns(len(active)), active):
             with col:
                 st.metric(label=label, value=value, help=help_text)
     else:
@@ -1123,128 +1538,114 @@ def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) 
         st.info("📭 Your inventory is empty — add items in the 📦 Inventory tab!")
         return
 
-    # ── Expiry Radar ──────────────────────────────────────────────────────
-    st.subheader("🚨 Expiry Radar — Next 30 Days")
-    st.caption("Items from Consumables and Toiletries categories expiring soon.")
+    # ── Alerts Tier: Expiry Radar + Maintenance ───────────────────────────
+    col_expiry, col_maint = st.columns(2)
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    in_30 = today + pd.Timedelta(days=30)
 
-    today     = pd.Timestamp.now(tz="UTC").normalize()
-    in_30     = today + pd.Timedelta(days=30)
+    with col_expiry:
+        st.markdown("### 🚨 Expiry Radar — 30 Days")
+        if "expiry_date" in df.columns:
+            exp = df[df["expiry_date"].notna()].copy()
+            exp["expiry_date"] = pd.to_datetime(exp["expiry_date"], utc=True, errors="coerce")
+            exp = exp[(exp["expiry_date"] >= today) & (exp["expiry_date"] <= in_30)].sort_values("expiry_date")
+        else:
+            exp = pd.DataFrame()
 
-    if "expiry_date" in df.columns:
-        expiry_df = df[df["expiry_date"].notna()].copy()
-        expiry_df["expiry_date"] = pd.to_datetime(expiry_df["expiry_date"], utc=True, errors="coerce")
-        expiry_df = expiry_df[
-            (expiry_df["expiry_date"] >= today) &
-            (expiry_df["expiry_date"] <= in_30)
-        ].sort_values("expiry_date")
-    else:
-        expiry_df = pd.DataFrame()
+        if exp.empty:
+            st.success("✅ Nothing expiring in 30 days.")
+        else:
+            st.warning(f"⚠️ {len(exp)} item(s) expiring soon.")
+            r = exp[["item_name", "expiry_date", "quantity"]].copy()
+            r["Days Left"] = (r["expiry_date"] - today).dt.days
+            r = r.rename(columns={"item_name": "Item", "expiry_date": "Expires", "quantity": "Qty"})
+            st.dataframe(r, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Expires":    st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+                             "Days Left":  st.column_config.NumberColumn(format="%d d"),
+                         })
 
-    if expiry_df.empty:
-        st.success("✅ Nothing expiring in the next 30 days.")
-    else:
-        st.warning(f"⚠️ {len(expiry_df)} item(s) expiring within 30 days.")
+    with col_maint:
+        st.markdown("### 🔧 Maintenance Alerts")
+        if maintenance_df.empty:
+            st.info("No maintenance tasks set up yet.")
+        else:
+            m = maintenance_df.copy()
+            m["next_due_ts"] = pd.to_datetime(m["next_due"], utc=True, errors="coerce")
+            overdue = m[m["next_due_ts"] < today].copy()
+            due_soon = m[(m["next_due_ts"] >= today) & (m["next_due_ts"] <= today + pd.Timedelta(days=7))].copy()
 
-        # Build location lookup
-        loc_lookup = (
-            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
-            if not locations_df.empty else {}
-        )
-
-        radar_display = expiry_df[
-            ["item_name", "category", "quantity", "custom_unit",
-             "expiry_date", "location_id"]
-        ].copy()
-        radar_display["Location"]    = radar_display["location_id"].map(loc_lookup).fillna("Unassigned")
-        radar_display["Days Left"]   = (
-            radar_display["expiry_date"] - today
-        ).dt.days
-        radar_display = radar_display.rename(columns={
-            "item_name":   "Item",
-            "category":    "Category",
-            "quantity":    "Qty",
-            "custom_unit": "Unit",
-            "expiry_date": "Expires On",
-        })[["Item", "Category", "Location", "Qty", "Unit", "Expires On", "Days Left"]]
-
-        st.dataframe(
-            radar_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Expires On":  st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
-                "Days Left":   st.column_config.NumberColumn(format="%d days"),
-                "Qty":         st.column_config.NumberColumn(format="%.0f"),
-            },
-        )
+            if overdue.empty and due_soon.empty:
+                st.success("✅ No overdue or upcoming maintenance.")
+            else:
+                if not overdue.empty:
+                    st.error(f"🔴 {len(overdue)} overdue task(s)")
+                    for _, t in overdue.iterrows():
+                        st.markdown(f"- **{t['task_name']}** — due {t['next_due']}")
+                if not due_soon.empty:
+                    st.warning(f"🟡 {len(due_soon)} task(s) due within 7 days")
+                    for _, t in due_soon.iterrows():
+                        st.markdown(f"- **{t['task_name']}** — due {t['next_due']}")
 
     st.divider()
 
-    # ── Insurance Ledger ──────────────────────────────────────────────────
-    st.subheader("🏦 Value by Location")
-    st.caption("Sum of estimated values for Electronics, Appliances, and Valuables.")
+    # ── Financial Tier ────────────────────────────────────────────────────
+    st.subheader("💷 Financial Overview")
 
-    if "estimated_value" in df.columns:
+    sunk_cost   = 0.0
+    asset_value = 0.0
+
+    if not df.empty:
+        cons = df[df["category"].isin(_EXPIRY_CATS)].copy()
+        if "unit_cost" in cons.columns:
+            cons["unit_cost"] = pd.to_numeric(cons["unit_cost"], errors="coerce").fillna(0)
+            sunk_cost = float((cons["quantity"] * cons["unit_cost"]).sum())
+
+        durable = df[df["category"].isin(_DURABLE_CATS)].copy()
+        if "estimated_value" in durable.columns:
+            asset_value = float(pd.to_numeric(durable["estimated_value"], errors="coerce").fillna(0).sum())
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        st.metric(
+            "🧴 Total Sunk Cost (Consumables/Toiletries)",
+            f"£{sunk_cost:,.2f}",
+            help="Sum of (quantity × unit_cost) for perishable categories.",
+        )
+    with col_f2:
+        st.metric(
+            "🏦 Total Asset Value (Durables)",
+            f"£{asset_value:,.2f}",
+            help="Sum of estimated_value for Electronics, Appliances, Valuables, Furniture.",
+        )
+
+    # Asset breakdown by location
+    if not df.empty and "estimated_value" in df.columns:
         asset_df = df[df["estimated_value"].notna() & (df["estimated_value"] > 0)].copy()
-    else:
-        asset_df = pd.DataFrame()
-
-    if asset_df.empty:
-        st.info("No asset values recorded yet. Add estimated values when logging Electronics, Appliances, or Valuables.")
-    else:
-        loc_lookup = (
-            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
-            if not locations_df.empty else {}
-        )
-        asset_df["Location"] = asset_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
-
-        ledger = (
-            asset_df.groupby("Location")["estimated_value"]
-            .sum()
-            .reset_index()
-            .rename(columns={"estimated_value": "Total Value (£)"})
-            .sort_values("Total Value (£)", ascending=False)
-        )
-
-        total_value = ledger["Total Value (£)"].sum()
-
-        # Top metric
-        st.metric("💷 Total Household Asset Value", f"£{total_value:,.2f}")
-
-        col_tbl, col_chart = st.columns([1, 1])
-        with col_tbl:
-            ledger_display = ledger.copy()
-            ledger_display["Total Value (£)"] = ledger_display["Total Value (£)"].apply(
-                lambda x: f"£{x:,.2f}"
+        if not asset_df.empty:
+            asset_df["Location"] = asset_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+            ledger = (
+                asset_df.groupby("Location")["estimated_value"]
+                .sum().reset_index()
+                .rename(columns={"estimated_value": "Total Value (£)"})
+                .sort_values("Total Value (£)", ascending=False)
             )
-            st.dataframe(ledger_display, use_container_width=True, hide_index=True)
-
-        with col_chart:
-            fig = px.bar(
-                ledger,
-                x="Location",
-                y="Total Value (£)",
-                color="Location",
-                color_discrete_sequence=px.colors.qualitative.Set2,
-                text_auto=".2s",
+            fig_bar = px.bar(
+                ledger, x="Location", y="Total Value (£)", color="Location",
+                color_discrete_sequence=px.colors.qualitative.Set2, text_auto=".2s",
             )
-            fig.update_layout(
-                showlegend=False,
-                height=300,
-                margin=dict(t=20, b=10, l=10, r=10),
-                xaxis_title=None,
-            )
-            fig.update_traces(textposition="outside")
-            st.plotly_chart(fig, use_container_width=True)
+            fig_bar.update_layout(showlegend=False, height=280,
+                                  margin=dict(t=10, b=10, l=10, r=10), xaxis_title=None)
+            fig_bar.update_traces(textposition="outside")
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     st.divider()
 
-    # ── Altair bar chart ──────────────────────────────────────────────────
+    # ── Quantity by Item bar chart ────────────────────────────────────────
     st.subheader("📊 Quantity by Item")
-
-    chart_df          = df[["item_name", "quantity"]].copy()
-    chart_df.columns  = ["Item", "Quantity"]
-    selection         = alt.selection_point(fields=["Item"])
+    chart_df         = df[["item_name", "quantity"]].copy()
+    chart_df.columns = ["Item", "Quantity"]
+    selection        = alt.selection_point(fields=["Item"])
 
     bar = (
         alt.Chart(chart_df)
@@ -1253,21 +1654,16 @@ def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) 
             x=alt.X("Item:N", sort="-y", axis=alt.Axis(labelAngle=-30, labelLimit=120)),
             y=alt.Y("Quantity:Q"),
             color=alt.condition(selection, alt.value("#4A90D9"), alt.value("#b8d4f0")),
-            tooltip=[
-                alt.Tooltip("Item:N",     title="Item"),
-                alt.Tooltip("Quantity:Q", title="Qty", format=".2f"),
-            ],
+            tooltip=[alt.Tooltip("Item:N", title="Item"), alt.Tooltip("Quantity:Q", title="Qty", format=".2f")],
         )
         .add_params(selection)
         .properties(height=350)
     )
-
-    chart_event = st.altair_chart(
-        bar, theme="streamlit", use_container_width=True,
-        on_select="rerun", key="altair_bar_chart",
-    )
+    chart_event = st.altair_chart(bar, theme="streamlit", use_container_width=True,
+                                   on_select="rerun", key="altair_bar_chart")
     if chart_event:
         st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 14.  INVENTORY TAB
@@ -1405,33 +1801,48 @@ def render_settings(prefs: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 16.  MAIN APPLICATION SHELL
 # ─────────────────────────────────────────────────────────────────────────────
+
 def render_main_app() -> None:
     """
-    3 Supabase round-trips per full rerun:
+    5 Supabase round-trips per full rerun:
         1. fetch_inventory()
         2. fetch_preferences()
         3. fetch_locations()
-    All results passed as arguments — no N+1 queries inside renderers.
+        4. fetch_shopping_history()
+        5. fetch_maintenance_tasks()
+    All passed as arguments — no N+1 queries inside renderers.
     """
     with st.spinner("Loading your data…"):
-        df:           pd.DataFrame = fetch_inventory()
-        prefs:        dict         = fetch_preferences()
-        locations_df: pd.DataFrame = fetch_locations()
+        df:              pd.DataFrame = fetch_inventory()
+        prefs:           dict         = fetch_preferences()
+        locations_df:    pd.DataFrame = fetch_locations()
+        shopping_df:     pd.DataFrame = fetch_shopping_history()
+        maintenance_df:  pd.DataFrame = fetch_maintenance_tasks()
 
-    render_sidebar(prefs, df)   # ← was render_sidebar(prefs)
+    render_sidebar(prefs, df, locations_df)
 
-    tab_locations, tab_inventory, tab_dashboard = st.tabs(
-        ["🏠 Locations", "📦 Inventory", "📊 Dashboard"]
-    )
+    tab_loc, tab_inv, tab_dash, tab_proc, tab_maint = st.tabs([
+        "🏠 Locations",
+        "📦 Inventory",
+        "📊 Dashboard",
+        "🛒 Procurement",
+        "🔧 Maintenance",
+    ])
 
-    with tab_locations:
+    with tab_loc:
         render_home_tab(df, locations_df)
 
-    with tab_inventory:
+    with tab_inv:
         render_inventory(df)
 
-    with tab_dashboard:
-        render_dashboard(df, prefs, locations_df)
+    with tab_dash:
+        render_dashboard(df, prefs, locations_df, maintenance_df)
+
+    with tab_proc:
+        render_procurement(df, shopping_df, locations_df)
+
+    with tab_maint:
+        render_maintenance(maintenance_df, df)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 17.  ENTRY POINT  —  Security Gate
