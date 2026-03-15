@@ -1199,7 +1199,7 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
 # ─────────────────────────────────────────────────────────────────────────────
-_CARDS_PER_ROW = 3
+CARDS_PER_ROW = 3
 
 def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
     with col:
