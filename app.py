@@ -527,6 +527,37 @@ def dialog_delete_location(loc_id: str, loc_name: str) -> None:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
 
+@st.dialog("⚠️ Delete Account")
+def dialog_delete_account() -> None:
+    st.error(
+        "**This is permanent and cannot be undone.**\n\n"
+        "Deleting your account will remove:\n"
+        "- All inventory items\n"
+        "- All locations\n"
+        "- Your preferences\n"
+        "- Your login credentials"
+    )
+    st.divider()
+    st.caption("Type **DELETE** below to confirm.")
+    confirmation = st.text_input("Confirmation", placeholder="Type DELETE here", label_visibility="collapsed")
+
+    col_del, col_cancel = st.columns(2)
+    with col_del:
+        if st.button("🗑️ Permanently Delete Account", type="primary", use_container_width=True):
+            if confirmation.strip() != "DELETE":
+                st.error("You must type DELETE exactly to confirm.")
+                return
+            try:
+                _set_postgrest_auth()
+                supabase.rpc("delete_user_account").execute()
+                _clear_session()
+                st.toast("Account deleted.", icon="🗑️")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Deletion failed: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10.  INVENTORY ITEM DIALOGS  (Add / Edit / Delete)
@@ -778,7 +809,7 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 11.  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
-def render_sidebar(prefs: dict) -> None:
+def render_sidebar(prefs: dict, df: pd.DataFrame) -> None:
     with st.sidebar:
         st.markdown("## 📦 Inventory Manager")
         st.caption("Multi-tenant · Free Tier")
@@ -793,7 +824,7 @@ def render_sidebar(prefs: dict) -> None:
 
         st.divider()
 
-        # ── Settings ──────────────────────────────────────────────────────
+        # ── Dashboard Settings ─────────────────────────────────────────────
         with st.expander("⚙️ Dashboard Settings", expanded=False):
             layout: dict = prefs.get("dashboard_layout", {})
 
@@ -835,12 +866,44 @@ def render_sidebar(prefs: dict) -> None:
 
         st.divider()
 
+        # ── Account ────────────────────────────────────────────────────────
         with st.expander("👤 Account", expanded=False):
             st.markdown("**Email:**")
             st.code(email, language=None)
             st.markdown("**User ID:**")
             st.code(uid, language=None)
             st.caption("Your UUID is the RLS isolation key at the database level.")
+
+            st.divider()
+
+            # ── Export CSV ─────────────────────────────────────────────────
+            if not df.empty:
+                export_df = df.drop(columns=["id", "location_id"], errors="ignore").copy()
+                # Format dates for readability
+                for col in ["expiry_date", "warranty_until", "created_at", "updated_at"]:
+                    if col in export_df.columns:
+                        export_df[col] = pd.to_datetime(export_df[col], errors="coerce").dt.strftime("%d/%m/%Y")
+                csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Export Inventory as CSV",
+                    data=csv_bytes,
+                    file_name=f"inventory_export_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("No data to export yet.")
+
+            st.divider()
+
+            # ── Delete Account ─────────────────────────────────────────────
+            if st.button(
+                "🗑️ Delete My Account",
+                use_container_width=True,
+                type="primary",
+                help="Permanently deletes your account and all data.",
+            ):
+                dialog_delete_account()
 
         st.divider()
 
@@ -1355,7 +1418,7 @@ def render_main_app() -> None:
         prefs:        dict         = fetch_preferences()
         locations_df: pd.DataFrame = fetch_locations()
 
-    render_sidebar(prefs)   # Settings now live here
+    render_sidebar(prefs, df)   # ← was render_sidebar(prefs)
 
     tab_locations, tab_inventory, tab_dashboard = st.tabs(
         ["🏠 Locations", "📦 Inventory", "📊 Dashboard"]
