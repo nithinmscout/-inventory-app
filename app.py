@@ -1200,119 +1200,249 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
 # ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("🏠 Room Details", width="large")
+def dialog_view_room(loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
+    bg   = loc.get("color", "#e0f2fe")
+    icon = loc.get("icon", "📦")
+    name = loc.get("name", "Location")
+    loc_id = loc.get("id")
+
+    st.markdown(
+        f"""<div style="background:{_esc(bg)};border-radius:12px;padding:14px 20px;margin-bottom:14px">
+          <span style="font-size:2rem">{_esc(icon)}</span>
+          <span style="font-weight:800;font-size:1.35rem;margin-left:10px;color:#0f172a">{_esc(name)}</span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    in_30 = today + pd.Timedelta(days=30)
+
+    # ── Category mini donut + stats ───────────────────────────────────────
+    if not loc_items.empty:
+        cat_counts = (
+            loc_items.groupby("category")["quantity"].sum().reset_index()
+            .rename(columns={"category": "Category", "quantity": "Total Qty"})
+        )
+        fig_mini = px.pie(
+            cat_counts, names="Category", values="Total Qty",
+            hole=0.55, color_discrete_sequence=px.colors.qualitative.Pastel,
+        )
+        fig_mini.update_traces(textposition="outside", textinfo="label+percent")
+        fig_mini.update_layout(
+            height=230, margin=dict(t=10, b=10, l=10, r=10), showlegend=False,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        )
+        col_d, col_s = st.columns([2, 3])
+        with col_d:
+            st.plotly_chart(fig_mini, use_container_width=True)
+        with col_s:
+            expiring = 0
+            if "expiry_date" in loc_items.columns:
+                exp_ts   = pd.to_datetime(loc_items["expiry_date"], utc=True, errors="coerce")
+                expiring = int(((exp_ts >= today) & (exp_ts <= in_30)).sum())
+            total_val = float(
+                pd.to_numeric(loc_items.get("estimated_value", pd.Series(dtype=float)), errors="coerce")
+                .fillna(0).sum()
+            )
+            st.metric("Items",          len(loc_items))
+            st.metric("Est. Value",     f"£{total_val:,.2f}")
+            st.metric("Expiring (30d)", expiring)
+        st.divider()
+
+    # ── Storage units ─────────────────────────────────────────────────────
+    if not loc_units.empty:
+        for _, unit in loc_units.iterrows():
+            uid        = unit["id"]
+            unit_items = (
+                loc_items[loc_items["unit_id"] == uid].copy()
+                if not loc_items.empty and "unit_id" in loc_items.columns else pd.DataFrame()
+            )
+            ucount = len(unit_items)
+            with st.expander(
+                f"{unit.get('icon','📦')} **{unit.get('name','Unit')}** — {ucount} item{'s' if ucount != 1 else ''}",
+                expanded=ucount > 0,
+            ):
+                if unit_items.empty:
+                    st.caption("No items in this unit.")
+                else:
+                    for _, item in unit_items.iterrows():
+                        u_str   = item.get("custom_unit") or ""
+                        qty_fmt = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
+                        st.markdown(f"- **{item['item_name']}** — {qty_fmt} {u_str}".strip())
+
+    # ── Directly in room ──────────────────────────────────────────────────
+    direct = (
+        loc_items[loc_items["unit_id"].isna()].copy()
+        if not loc_items.empty and "unit_id" in loc_items.columns else loc_items.copy()
+    )
+    if not direct.empty:
+        with st.expander(f"🏠 Directly in room ({len(direct)})", expanded=True):
+            for _, item in direct.iterrows():
+                u_str   = item.get("custom_unit") or ""
+                qty_fmt = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
+                st.markdown(f"- **{item['item_name']}** — {qty_fmt} {u_str}".strip())
+
+    st.divider()
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if st.button("➕ Add Unit", use_container_width=True):
+            dialog_add_unit(loc_id, name)
+    with b2:
+        if st.button("✏️ Edit Room", use_container_width=True):
+            dialog_edit_location(loc)
+    with b3:
+        if st.button("🗑️ Delete Room", use_container_width=True):
+            dialog_delete_location(loc_id, name)
+
 
 def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
     with col:
-        bg     = loc.get("color", "#e0f2fe")
-        icon   = loc.get("icon", "📦")
-        name   = loc.get("name", "Location")
-        loc_id = loc.get("id")
-        count  = len(loc_items) if not loc_items.empty else 0
+        bg       = loc.get("color", "#e0f2fe")
+        icon     = loc.get("icon", "📦")
+        name     = loc.get("name", "Location")
+        loc_id   = loc.get("id")
+        count    = len(loc_items) if not loc_items.empty else 0
+        u_count  = len(loc_units) if not loc_units.empty else 0
 
-        direct_items = (
-            loc_items[loc_items["unit_id"].isna()].copy()
-            if not loc_items.empty and "unit_id" in loc_items.columns
-            else loc_items.copy()
-        )
+        today    = pd.Timestamp.now(tz="UTC").normalize()
+        in_30    = today + pd.Timedelta(days=30)
+        expiring = 0
+        if not loc_items.empty and "expiry_date" in loc_items.columns:
+            exp_ts   = pd.to_datetime(loc_items["expiry_date"], utc=True, errors="coerce")
+            expiring = int(((exp_ts >= today) & (exp_ts <= in_30)).sum())
 
-        # ── Big coloured header ──────────────────────────────────────
+        total_val = 0.0
+        if not loc_items.empty and "estimated_value" in loc_items.columns:
+            total_val = float(
+                pd.to_numeric(loc_items["estimated_value"], errors="coerce").fillna(0).sum()
+            )
+
+        # ── Coloured header ────────────────────────────────────────────
         st.markdown(
-            f"""
-            <div style="background:{_esc(bg)};border-radius:16px 16px 0 0;
-                        padding:22px 24px 18px 24px;
+            f"""<div style="background:{_esc(bg)};border-radius:16px 16px 0 0;
+                        padding:20px 22px 14px 22px;
                         border:1px solid rgba(0,0,0,0.08);border-bottom:none;">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                 <div>
-                  <p style="font-weight:800;font-size:1.5rem;margin:0 0 4px 0;
+                  <p style="font-weight:800;font-size:1.35rem;margin:0 0 6px 0;
                              color:#0f172a;line-height:1.2">{_esc(name)}</p>
-                  <p style="color:#475569;font-size:0.8rem;margin:0">
-                    {count} item{'s' if count != 1 else ''}
-                  </p>
+                  <span style="font-size:0.72rem;color:#475569;background:rgba(0,0,0,0.07);
+                                border-radius:20px;padding:2px 9px">
+                    {u_count} unit{'s' if u_count != 1 else ''}
+                  </span>
                 </div>
-                <span style="font-size:3.2rem;line-height:1;opacity:0.9">{_esc(icon)}</span>
+                <span style="font-size:2.8rem;line-height:1;opacity:0.9">{_esc(icon)}</span>
               </div>
-            </div>
-            """,
+            </div>""",
             unsafe_allow_html=True,
         )
 
+        # ── Fixed-height stats body ────────────────────────────────────
         with st.container(border=True):
-            # ── Unit rows ────────────────────────────────────────────
-            if not loc_units.empty:
-                max_qty = max(float(loc_items["quantity"].max()), 1.0) if not loc_items.empty and "quantity" in loc_items.columns else 1.0
-
-                for _, unit in loc_units.iterrows():
-                    uid        = unit["id"]
-                    uname      = unit.get("name", "Unit")
-                    uicon      = unit.get("icon", "📦")
-                    unit_items = (
-                        loc_items[loc_items["unit_id"] == uid].copy()
-                        if not loc_items.empty and "unit_id" in loc_items.columns
-                        else pd.DataFrame()
-                    )
-                    ucount = len(unit_items)
-                    uqty   = float(unit_items["quantity"].sum()) if not unit_items.empty else 0.0
-                    pct    = min(uqty / max_qty * 100, 100.0)
-                    bar_color = "#ef4444" if pct < 20 else "#f59e0b" if pct < 50 else "#14b8a6"
-
-                    col_info, col_btns = st.columns([5, 2])
-                    with col_info:
-                        st.markdown(
-                            f"""
-                            <div style="margin:6px 0 0 0">
-                              <span style="font-size:1.1rem">{_esc(uicon)}</span>
-                              <span style="font-weight:600;font-size:0.92rem;margin-left:6px">{_esc(uname)}</span>
-                              <span style="background:#e2e8f0;border-radius:12px;padding:1px 8px;
-                                           font-size:0.72rem;font-weight:700;margin-left:6px;color:#475569">
-                                {ucount}
-                              </span>
-                            </div>
-                            <div class="unit-bar-track">
-                              <div style="background:{bar_color};width:{pct:.0f}%;height:5px;border-radius:4px;"></div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                    with col_btns:
-                        cb_e, cb_d = st.columns(2)
-                        with cb_e:
-                            if st.button("✏️", key=f"edit_unit_{uid}", help="Edit unit"):
-                                dialog_edit_unit(unit.to_dict())
-                        with cb_d:
-                            if st.button("🗑️", key=f"del_unit_{uid}", help="Delete unit"):
-                                dialog_delete_unit(uid, uname)
-
-                st.divider()
-
-            # ── Directly in room ─────────────────────────────────────
-            with st.expander(
-                f"🏠 Directly in room ({len(direct_items)})",
-                expanded=(loc_units.empty if not loc_units.empty else True),
-            ):
-                if direct_items.empty:
-                    st.caption("No items placed directly in this room.")
-                else:
-                    for _, item in direct_items.iterrows():
-                        unit_str = item.get("custom_unit") or ""
-                        qty_fmt  = f"{item['quantity']:.0f}" if item["quantity"] == int(item["quantity"]) else f"{item['quantity']:.2f}"
-                        st.markdown(f"- **{item['item_name']}** — {qty_fmt} {unit_str}".strip())
-
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.markdown(
+                    f"""<div style="text-align:center;padding:10px 0">
+                      <p style="font-size:1.7rem;font-weight:800;margin:0;color:#0f172a">{count}</p>
+                      <p style="font-size:0.68rem;color:#64748b;margin:2px 0 0 0;text-transform:uppercase;letter-spacing:.05em">Items</p>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            with m2:
+                val_str = f"£{total_val:,.0f}" if total_val > 0 else "—"
+                st.markdown(
+                    f"""<div style="text-align:center;padding:10px 0">
+                      <p style="font-size:1.7rem;font-weight:800;margin:0;color:#0f172a">{_esc(val_str)}</p>
+                      <p style="font-size:0.68rem;color:#64748b;margin:2px 0 0 0;text-transform:uppercase;letter-spacing:.05em">Value</p>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            with m3:
+                exp_color = "#ef4444" if expiring > 0 else "#22c55e"
+                st.markdown(
+                    f"""<div style="text-align:center;padding:10px 0">
+                      <p style="font-size:1.7rem;font-weight:800;margin:0;color:{exp_color}">{expiring}</p>
+                      <p style="font-size:0.68rem;color:#64748b;margin:2px 0 0 0;text-transform:uppercase;letter-spacing:.05em">Expiring</p>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
             st.divider()
-
-            # ── Action buttons ────────────────────────────────────────
-            b1, b2, b3 = st.columns(3)
-            with b1:
-                if st.button("➕ Unit", key=f"add_unit_{loc_id}", use_container_width=True):
-                    dialog_add_unit(loc_id, name)
-            with b2:
-                if st.button("✏️ Edit", key=f"edit_loc_{loc_id}", use_container_width=True):
-                    dialog_edit_location(loc)
-            with b3:
-                if st.button("🗑️", key=f"del_loc_{loc_id}", use_container_width=True):
-                    dialog_delete_location(loc_id, name)
+            if st.button(
+                "🔍 View Room",
+                key=f"view_room_{loc_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                dialog_view_room(loc, loc_items, loc_units)
 
 
 def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.DataFrame) -> None:
+
+    # ── Triage Inbox (unassigned items) — TOP RIGHT ───────────────────────
+    unassigned = pd.DataFrame()
+    if not df.empty and "location_id" in df.columns:
+        unassigned = df[df["location_id"].isna()].copy()
+
+    if not unassigned.empty:
+        st.markdown(
+            """<div style="background:linear-gradient(135deg,#fef3c7,#fde68a);
+                           border-left:4px solid #f59e0b;border-radius:10px;
+                           padding:12px 18px;margin-bottom:16px;">
+              <p style="font-weight:700;color:#78350f;margin:0 0 2px 0">
+                📥 Triage Inbox — {n} Unassigned Item{s}
+              </p>
+              <p style="color:#92400e;font-size:0.82rem;margin:0">
+                Quick-assign each item to a room below.
+              </p>
+            </div>""".replace("{n}", str(len(unassigned))).replace("{s}", "s" if len(unassigned) != 1 else ""),
+            unsafe_allow_html=True,
+        )
+        loc_options = (
+            {r["name"]: r["id"] for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+        for _, item in unassigned.iterrows():
+            item_id   = str(item["id"])
+            unit_str  = item.get("custom_unit") or ""
+            qty_fmt   = (
+                f"{item['quantity']:.0f}"
+                if item["quantity"] == int(item["quantity"])
+                else f"{item['quantity']:.2f}"
+            )
+            col_name, col_sel, col_btn = st.columns([3, 3, 1])
+            with col_name:
+                st.markdown(
+                    f"""<div style="padding:8px 0;">
+                      <span style="font-weight:600">{_esc(item['item_name'])}</span>
+                      <span style="color:#64748b;font-size:0.85rem"> — {_esc(qty_fmt)} {_esc(unit_str)}</span>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            with col_sel:
+                chosen_room = st.selectbox(
+                    "Assign to",
+                    options=["— select room —"] + list(loc_options.keys()),
+                    key=f"triage_room_{item_id}",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                if st.button("✅", key=f"triage_btn_{item_id}", help="Assign to room"):
+                    if chosen_room == "— select room —":
+                        st.warning("Please select a room first.")
+                    else:
+                        try:
+                            _set_postgrest_auth()
+                            supabase.table("inventory").update({
+                                "location_id": loc_options[chosen_room],
+                                "updated_at":  datetime.now(timezone.utc).isoformat(),
+                            }).eq("id", item_id).execute()
+                            st.toast(f"✅ {item['item_name']} → {chosen_room}", icon="✅")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Failed to assign: {exc}")
+        st.divider()
+
     # ── Page header ───────────────────────────────────────────────────────
     col_hdr, col_add = st.columns([5, 1])
     with col_hdr:
@@ -1334,66 +1464,67 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
 
     locs = locations_df.to_dict("records")
 
-    # ── Card grid (3 per row) ─────────────────────────────────────────────
+    # ── Lean card grid (3 per row, uniform height) ────────────────────────
     for row_start in range(0, len(locs), CARDS_PER_ROW):
         row_locs = locs[row_start: row_start + CARDS_PER_ROW]
         cols     = st.columns(CARDS_PER_ROW)
         for col, loc in zip(cols, row_locs):
             loc_id    = loc.get("id")
-            loc_items = df[df["location_id"] == loc_id].copy() if not df.empty and "location_id" in df.columns else pd.DataFrame()
-            loc_units = units_df[units_df["location_id"] == loc_id].copy() if not units_df.empty else pd.DataFrame()
+            loc_items = (
+                df[df["location_id"] == loc_id].copy()
+                if not df.empty and "location_id" in df.columns else pd.DataFrame()
+            )
+            loc_units = (
+                units_df[units_df["location_id"] == loc_id].copy()
+                if not units_df.empty else pd.DataFrame()
+            )
             _location_card(col, loc, loc_items, loc_units)
+        st.write("")
 
-        st.write("")  # row spacing
-
-    # ── Unassigned items ──────────────────────────────────────────────────
-    if not df.empty and "location_id" in df.columns:
-        unassigned = df[df["location_id"].isna()].copy()
-        if not unassigned.empty:
-            st.divider()
-            with st.expander(f"📦 Unassigned Items ({len(unassigned)})", expanded=False):
-                for _, item in unassigned.iterrows():
-                    unit = item.get("custom_unit") or ""
-                    qty  = f"{item['quantity']:.0f}"
-                    st.markdown(f"- **{item['item_name']}** — {qty} {unit}".strip())
-
-    # ── Nested summary table ──────────────────────────────────────────────
+    # ── Spatial Treemap — Digital Twin ────────────────────────────────────
     if not df.empty:
         st.divider()
-        st.markdown("**All Items by Location & Storage Unit**")
+        st.markdown("**🗺️ Spatial Overview — Digital Twin**")
+        st.caption("Block size = quantity. Click a room to zoom into its storage units.")
 
-        loc_lookup  = {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")} if not locations_df.empty else {}
-        unit_lookup = {r["id"]: f"{r['icon']} {r['name']}" for r in units_df.to_dict("records")}     if not units_df.empty else {}
-
-        summary = df[["item_name", "quantity", "custom_unit", "location_id", "unit_id", "updated_at"]].copy()
-        summary["Location"]     = summary["location_id"].map(loc_lookup).fillna("📦 Unassigned")
-        summary["Storage Unit"] = summary["unit_id"].map(unit_lookup).fillna("— In Room —")
-        summary = (
-            summary.drop(columns=["location_id", "unit_id"])
-            .rename(columns={
-                "item_name":   "Item",
-                "quantity":    "Quantity",
-                "custom_unit": "Unit",
-                "updated_at":  "Last Updated",
-            })
-            .sort_values(["Location", "Storage Unit", "Item"])
-            .reset_index(drop=True)
+        loc_lookup  = (
+            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
         )
-        max_qty = max(float(df["quantity"].max()), 1.0)
-
-        st.dataframe(
-            summary[["Location", "Storage Unit", "Item", "Quantity", "Unit", "Last Updated"]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Quantity": st.column_config.ProgressColumn(
-                    "Qty", min_value=0, max_value=max_qty, format="%.0f"
-                ),
-                "Last Updated": st.column_config.DatetimeColumn(
-                    "Last Updated", format="DD/MM/YYYY"
-                ),
-            },
+        unit_lookup = (
+            {r["id"]: f"{r['icon']} {r['name']}" for r in units_df.to_dict("records")}
+            if not units_df.empty else {}
         )
+
+        tree_df = df[["item_name", "quantity", "location_id", "unit_id", "category"]].copy()
+        tree_df["Room"] = tree_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+        tree_df["Unit"] = tree_df["unit_id"].map(unit_lookup).fillna("— In Room —")
+        tree_df["quantity"] = pd.to_numeric(tree_df["quantity"], errors="coerce").fillna(0)
+        tree_df = tree_df[tree_df["quantity"] > 0]
+
+        if not tree_df.empty:
+            fig_tree = px.treemap(
+                tree_df,
+                path=[px.Constant("🏠 Home"), "Room", "Unit", "item_name"],
+                values="quantity",
+                color="category",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                hover_data={"quantity": True, "category": True},
+                labels={"item_name": "Item", "quantity": "Qty"},
+            )
+            fig_tree.update_traces(
+                root_color="rgba(0,0,0,0)",
+                texttemplate="<b>%{label}</b><br>%{value:.0f}",
+                hovertemplate="<b>%{label}</b><br>Qty: %{value:.0f}<extra></extra>",
+            )
+            fig_tree.update_layout(
+                height=480,
+                margin=dict(t=30, b=10, l=10, r=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_tree, use_container_width=True)
+        else:
+            st.info("Add items with quantity > 0 to see the spatial overview.")
 
 
 @st.dialog("➕ Add Maintenance Task", width="large")
@@ -1448,53 +1579,107 @@ def dialog_add_maintenance_task(inventory_df: pd.DataFrame) -> None:
 
 @st.dialog("🛒 Log a Purchase", width="large")
 def dialog_log_purchase(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
-    if df.empty:
-        st.info("Add items to your inventory first.")
-        return
+    mode = st.radio(
+        "What are you logging?",
+        ["Log Existing Item", "Add & Log New Item"],
+        horizontal=True,
+        key="dlp_mode",
+    )
+    st.divider()
 
-    with st.form("log_receipt_modal_form"):
-        item_names    = sorted(df["item_name"].unique().tolist())
-        selected_item = st.selectbox("Item *", options=item_names)
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            qty_bought    = st.number_input("Quantity Bought *", min_value=0.01, step=1.0, value=1.0)
-        with col_b:
-            total_paid    = st.number_input("Total Price Paid (£)", min_value=0.0, step=0.01, value=0.0)
-        with col_c:
-            purchase_date = st.date_input("Purchase Date", value=datetime.now(timezone.utc).date())
-
-        submitted = st.form_submit_button("💾 Log Receipt", type="primary", use_container_width=True)
-
-    if submitted:
-        if qty_bought <= 0:
-            st.error("Quantity must be greater than 0.")
+    if mode == "Log Existing Item":
+        if df.empty:
+            st.info("Add items to your inventory first.")
             return
-        try:
-            _set_postgrest_auth()
-            item_row     = df[df["item_name"] == selected_item].iloc[0]
-            cat          = item_row.get("category") or "Other"
-            new_unitcost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
+        with st.form("log_existing_form"):
+            item_names    = sorted(df["item_name"].unique().tolist())
+            selected_item = st.selectbox("Item *", options=item_names)
+            ca, cb, cc    = st.columns(3)
+            with ca:
+                qty_bought    = st.number_input("Qty Bought *", min_value=0.01, step=1.0, value=1.0)
+            with cb:
+                total_paid    = st.number_input("Total Paid (£)", min_value=0.0, step=0.01, value=0.0)
+            with cc:
+                purchase_date = st.date_input("Date", value=datetime.now(timezone.utc).date())
+            submitted = st.form_submit_button("💾 Log Receipt", type="primary", use_container_width=True)
 
-            supabase.rpc("increment_inventory_quantity", {
-                "p_inventory_id":   str(item_row["id"]),
-                "p_quantity_delta": float(qty_bought),
-                "p_new_unit_cost":  new_unitcost,
-            }).execute()
+        if submitted:
+            if qty_bought <= 0:
+                st.error("Quantity must be greater than 0.")
+                return
+            try:
+                _set_postgrest_auth()
+                item_row      = df[df["item_name"] == selected_item].iloc[0]
+                new_unit_cost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
+                supabase.rpc("increment_inventory_quantity", {
+                    "p_inventory_id":   str(item_row["id"]),
+                    "p_quantity_delta": float(qty_bought),
+                    "p_new_unit_cost":  new_unit_cost,
+                }).execute()
+                supabase.table("shopping_history").insert({
+                    "user_id":          st.session_state["user_id"],
+                    "item_name":        selected_item,
+                    "category":         item_row.get("category") or "Other",
+                    "quantity_bought":  float(qty_bought),
+                    "total_price_paid": float(total_paid),
+                    "purchase_date":    purchase_date.isoformat(),
+                    "inventory_id":     str(item_row["id"]),
+                }).execute()
+                st.toast(f"✅ Logged {selected_item}!", icon="🛒")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to log receipt: {exc}")
 
-            supabase.table("shopping_history").insert({
-                "user_id":          st.session_state["user_id"],
-                "item_name":        selected_item,
-                "category":         cat,
-                "quantity_bought":  float(qty_bought),
-                "total_price_paid": float(total_paid),
-                "purchase_date":    purchase_date.isoformat(),
-                "inventory_id":     str(item_row["id"]),
-            }).execute()
+    else:  # ── Add & Log New Item ───────────────────────────────────────
+        with st.form("log_new_item_form"):
+            cn, cc2 = st.columns(2)
+            with cn:
+                new_item_name = st.text_input("New Item Name *", placeholder="e.g. Almond Milk")
+            with cc2:
+                new_category  = st.selectbox("Category *", options=CATEGORIES[:-1])
+            ca2, cb2, cc3 = st.columns(3)
+            with ca2:
+                qty_bought    = st.number_input("Qty Bought *", min_value=0.01, step=1.0, value=1.0)
+            with cb2:
+                total_paid    = st.number_input("Total Paid (£)", min_value=0.0, step=0.01, value=0.0)
+            with cc3:
+                purchase_date = st.date_input("Date", value=datetime.now(timezone.utc).date())
+            st.caption("The item will be created in your inventory with the purchased quantity.")
+            submitted = st.form_submit_button("➕ Add Item & Log", type="primary", use_container_width=True)
 
-            st.toast(f"✅ Logged purchase of {selected_item}!", icon="🛒")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Failed to log receipt: {exc}")
+        if submitted:
+            if not new_item_name.strip():
+                st.error("Item Name is required.")
+                return
+            if qty_bought <= 0:
+                st.error("Quantity must be greater than 0.")
+                return
+            try:
+                _set_postgrest_auth()
+                new_unit_cost = round(total_paid / qty_bought, 4) if total_paid > 0 else None
+                # Step 1 — INSERT new item, retrieve generated UUID
+                inv_resp = supabase.table("inventory").insert({
+                    "user_id":   st.session_state["user_id"],
+                    "item_name": new_item_name.strip(),
+                    "category":  new_category,
+                    "quantity":  float(qty_bought),
+                    "unit_cost": new_unit_cost,
+                }).execute()
+                new_inventory_id = inv_resp.data[0]["id"]
+                # Step 2 — INSERT shopping_history log
+                supabase.table("shopping_history").insert({
+                    "user_id":          st.session_state["user_id"],
+                    "item_name":        new_item_name.strip(),
+                    "category":         new_category,
+                    "quantity_bought":  float(qty_bought),
+                    "total_price_paid": float(total_paid),
+                    "purchase_date":    purchase_date.isoformat(),
+                    "inventory_id":     str(new_inventory_id),
+                }).execute()
+                st.toast(f"✅ Added & logged {new_item_name.strip()}!", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to add & log item: {exc}")
 
 
 def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
@@ -1504,7 +1689,6 @@ def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df
         if not locations_df.empty else {}
     )
 
-    # ── Page header with modal trigger ────────────────────────────────────
     col_hdr, col_btn = st.columns([4, 1])
     with col_hdr:
         st.subheader("🛒 Procurement")
@@ -1514,39 +1698,47 @@ def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df
     st.divider()
 
     # ── Section A: Low Stock ──────────────────────────────────────────────
-    st.subheader("📉 Low Stock Items")
+    st.markdown("**Low Stock Items**")
     st.caption("Items where current quantity ≤ min_threshold.")
-
     if not df.empty and "min_threshold" in df.columns:
         low = df[df["min_threshold"].notna() & (df["quantity"] <= df["min_threshold"])].copy()
     else:
         low = pd.DataFrame()
 
     if low.empty:
-        st.success("✅ All items are above their minimum threshold.")
+        st.success("All items are above their minimum threshold.")
     else:
-        low["Location"]  = low["location_id"].map(loc_lookup).fillna("📦 Unassigned")
-        low["Deficit"]   = (low["min_threshold"] - low["quantity"]).clip(lower=0)
-        low["Est. Budget (£)"] = (low["Deficit"] * low["unit_cost"].fillna(0)).round(2)
-        display_low = low[["item_name", "category", "Location", "quantity",
-                            "min_threshold", "Deficit", "Est. Budget (£)"]].rename(columns={
-            "item_name":     "Item",
-            "category":      "Category",
-            "quantity":      "Current Qty",
-            "min_threshold": "Min. Threshold",
+        low["Location"]    = low["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+        low["Deficit"]     = (low["min_threshold"] - low["quantity"]).clip(lower=0)
+        low["Est. Budget"] = (low["Deficit"] * low["unit_cost"].fillna(0)).round(2)
+        display_low = (
+            low[["item_name", "category", "Location", "quantity", "min_threshold", "Deficit", "Est. Budget"]]
+            .rename(columns={
+                "item_name":     "Item",
+                "category":      "Category",
+                "quantity":      "Current Qty",
+                "min_threshold": "Min. Threshold",
+            })
+        )
+        st.dataframe(display_low, use_container_width=True, hide_index=True, column_config={
+            "Est. Budget": st.column_config.NumberColumn(format="£%.2f"),
         })
-        st.dataframe(display_low, use_container_width=True, hide_index=True,
-                     column_config={
-                         "Est. Budget (£)": st.column_config.NumberColumn(format="£%.2f"),
-                     })
-        total_budget = low["Est. Budget (£)"].sum()
-        st.metric("🛒 Estimated Trip Budget", f"£{total_budget:,.2f}")
+        total_budget = low["Est. Budget"].sum()
+        st.metric("Estimated Restock Budget", f"£{total_budget:,.2f}")
 
+        # ── Shopping List CSV Export ──────────────────────────────────────
+        csv_bytes = display_low.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Download Shopping List (CSV)",
+            data=csv_bytes,
+            file_name="shopping_list.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
     st.divider()
 
-    # ── Section C: Spending Analytics ────────────────────────────────────
-    st.subheader("📊 Spending Analytics")
-
+    # ── Section B: Spending Analytics ────────────────────────────────────
+    st.markdown("**Spending Analytics**")
     if shopping_df.empty:
         st.info("No purchase history yet. Log a receipt above to see charts here.")
         return
@@ -1557,48 +1749,78 @@ def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df
         pd.to_datetime(shopping_df["purchase_date"], utc=True, errors="coerce") >= thirty_ago
     ].copy()
 
-    col_pie, col_line = st.columns([1, 1])
+    # ── High-level spend KPI ──────────────────────────────────────────────
+    total_spent_30d = float(recent["total_price_paid"].sum()) if not recent.empty else 0.0
+    st.metric("💳 Total Spent (Last 30 Days)", f"£{total_spent_30d:,.2f}")
+    st.divider()
+
+    col_pie, col_line = st.columns(2)
 
     with col_pie:
-        st.markdown("**Spending by Category — Last 30 Days**")
+        st.markdown("**By Category — Last 30 Days**")
         if recent.empty:
             st.caption("No purchases in the last 30 days.")
         else:
             cat_spend = (
                 recent.groupby("category")["total_price_paid"]
                 .sum().reset_index()
-                .rename(columns={"category": "Category", "total_price_paid": "Spent (£)"})
+                .rename(columns={"category": "Category", "total_price_paid": "Spent"})
             )
             fig_pie = px.pie(
-                cat_spend, names="Category", values="Spent (£)", hole=0.35,
+                cat_spend, names="Category", values="Spent",
+                hole=0.35,
                 color_discrete_sequence=px.colors.qualitative.Set2,
             )
             fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-            fig_pie.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10), showlegend=False)
+            fig_pie.update_layout(
+                height=320, margin=dict(t=20, b=10, l=10, r=10), showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            )
             st.plotly_chart(fig_pie, use_container_width=True)
 
     with col_line:
-        st.markdown("**Unit Cost Over Time — Selected Item**")
+        st.markdown("**Unit Cost Over Time**")
         item_list = sorted(shopping_df["item_name"].unique().tolist())
         if item_list:
-            selected_line = st.selectbox("Item", options=item_list, key="line_item_select",
-                                         label_visibility="collapsed")
+            selected_line = st.selectbox(
+                "Item", options=item_list, key="line_item_select", label_visibility="collapsed"
+            )
             item_hist = shopping_df[shopping_df["item_name"] == selected_line].copy()
             item_hist = item_hist[item_hist["quantity_bought"] > 0].copy()
             item_hist["unit_cost_calc"] = item_hist["total_price_paid"] / item_hist["quantity_bought"]
             item_hist = item_hist.sort_values("purchase_date")
-
             if len(item_hist) < 2:
                 st.caption("Need at least 2 purchases to show a trend.")
             else:
                 fig_line = px.line(
-                    item_hist, x="purchase_date", y="unit_cost_calc",
-                    markers=True,
+                    item_hist, x="purchase_date", y="unit_cost_calc", markers=True,
                     labels={"purchase_date": "Date", "unit_cost_calc": "Unit Cost (£)"},
                     color_discrete_sequence=["#4A90D9"],
                 )
-                fig_line.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10))
+                fig_line.update_layout(
+                    height=320, margin=dict(t=20, b=10, l=10, r=10),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                )
                 st.plotly_chart(fig_line, use_container_width=True)
+    st.divider()
+
+    # ── Section C: Full Purchase History ─────────────────────────────────
+    st.markdown("**Full Purchase History**")
+    history_display = (
+        shopping_df[["item_name", "category", "quantity_bought", "total_price_paid", "purchase_date"]]
+        .rename(columns={
+            "item_name":        "Item",
+            "category":         "Category",
+            "quantity_bought":  "Qty Bought",
+            "total_price_paid": "Total Paid",
+            "purchase_date":    "Date",
+        })
+    )
+    st.dataframe(history_display, use_container_width=True, hide_index=True, column_config={
+        "Total Paid": st.column_config.NumberColumn(format="£%.2f"),
+        "Date":       st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+    })
+
 
 def render_maintenance(maintenance_df: pd.DataFrame, df: pd.DataFrame) -> None:
     from datetime import timedelta, date as date_type
