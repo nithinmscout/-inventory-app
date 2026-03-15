@@ -232,6 +232,8 @@ def render_auth_page() -> None:
                             {"email": reg_email.strip(), "password": reg_pass}
                         )
                         if resp.user:
+                            # Seed default household locations for new accounts
+                            _seed_default_locations(resp.user.id)
                             st.success(
                                 "🎉 Account created! "
                                 "Check your email to confirm, then sign in."
@@ -246,13 +248,13 @@ def render_auth_page() -> None:
 # 7.  DATA ACCESS LAYER
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_inventory() -> pd.DataFrame:
-    """Returns all inventory rows including location_id for home tab joins."""
     try:
         _set_postgrest_auth()
         resp = (
             supabase.table("inventory")
             .select(
-                "id, item_name, quantity, custom_unit, description, "
+                "id, item_name, category, quantity, custom_unit, description, "
+                "expiry_date, estimated_value, warranty_until, "
                 "location_id, created_at, updated_at"
             )
             .order("created_at", desc=True)
@@ -260,14 +262,16 @@ def fetch_inventory() -> pd.DataFrame:
         )
         if resp.data:
             df = pd.DataFrame(resp.data)
-            df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
+            df["quantity"]         = pd.to_numeric(df["quantity"],         errors="coerce").fillna(0)
+            df["estimated_value"]  = pd.to_numeric(df["estimated_value"],  errors="coerce")
+            df["expiry_date"]      = pd.to_datetime(df["expiry_date"],     errors="coerce")
+            df["warranty_until"]   = pd.to_datetime(df["warranty_until"],  errors="coerce")
             return df
-        return pd.DataFrame(
-            columns=[
-                "id", "item_name", "quantity", "custom_unit",
-                "description", "location_id", "created_at", "updated_at",
-            ]
-        )
+        return pd.DataFrame(columns=[
+            "id", "item_name", "category", "quantity", "custom_unit",
+            "description", "expiry_date", "estimated_value",
+            "warranty_until", "location_id", "created_at", "updated_at",
+        ])
     except Exception as exc:
         st.error(f"Failed to load inventory: {exc}")
         return pd.DataFrame()
@@ -350,6 +354,52 @@ _CARD_COLOURS: dict[str, str] = {
     "Orange": "#ffedd5",
     "Grey":   "#f1f5f9",
 }
+
+# ── Item category taxonomy ────────────────────────────────────────────────────
+_CATEGORIES = [
+    "Consumables",
+    "Toiletries",
+    "Electronics",
+    "Appliances",
+    "Valuables",
+    "Furniture",
+    "Clothing",
+    "Other",
+]
+_EXPIRY_CATS   = {"Consumables", "Toiletries"}
+_WARRANTY_CATS = {"Electronics", "Appliances", "Valuables"}
+
+# ── Default locations seeded for every new user ───────────────────────────────
+_DEFAULT_LOCATIONS = [
+    {"name": "Kitchen",        "icon": "🍳", "color": "#fef9c3"},
+    {"name": "Living Room",    "icon": "🛋️", "color": "#dbeafe"},
+    {"name": "Master Bedroom", "icon": "🛏️", "color": "#ede9fe"},
+    {"name": "Guest Bathroom", "icon": "🚿", "color": "#ccfbf1"},
+    {"name": "Garage",         "icon": "🚗", "color": "#f1f5f9"},
+    {"name": "Attic",          "icon": "📦", "color": "#ffedd5"},
+]
+
+def _seed_default_locations(user_id: str) -> None:
+    """
+    Writes the standard household location set for a brand-new user.
+    Called immediately after supabase.auth.sign_up() succeeds.
+    Uses a service-role-style insert; the RLS INSERT policy allows it
+    because we pass the user's own ID.
+    """
+    try:
+        rows = [
+            {
+                "user_id":     user_id,
+                "name":        loc["name"],
+                "icon":        loc["icon"],
+                "color":       loc["color"],
+                "description": None,
+            }
+            for loc in _DEFAULT_LOCATIONS
+        ]
+        supabase.table("locations").insert(rows).execute()
+    except Exception:
+        pass  # Non-fatal — user can add locations manually
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,20 +543,57 @@ def dialog_add_item() -> None:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        item_name = st.text_input("Item Name *", placeholder="e.g. Training Bibs")
+        item_name = st.text_input("Item Name *", placeholder="e.g. Rice Bag")
     with col_b:
-        quantity = st.number_input("Quantity *", min_value=0.0, step=1.0, value=1.0)
+        category = st.selectbox("Category *", options=_CATEGORIES)
 
     col_c, col_d = st.columns(2)
     with col_c:
-        custom_unit = st.text_input("Unit", placeholder="e.g. pcs, kg, boxes")
+        quantity = st.number_input("Quantity *", min_value=0.0, step=1.0, value=1.0)
     with col_d:
+        custom_unit = st.text_input("Unit", placeholder="e.g. pcs, kg")
+
+    col_e, col_f = st.columns(2)
+    with col_e:
         loc_label   = st.selectbox("Location", options=list(loc_options.keys()))
         location_id = loc_options[loc_label]
+    with col_f:
+        st.empty()
 
-    description = st.text_area(
-        "Description / Notes", placeholder="Optional details…", height=100
-    )
+    # ── Conditional fields based on category ─────────────────────────────
+    expiry_date     = None
+    estimated_value = None
+    warranty_until  = None
+
+    if category in _EXPIRY_CATS:
+        st.divider()
+        st.caption("🗓️ Perishable fields")
+        expiry_date = st.date_input(
+            "Expiry Date",
+            value=None,
+            min_value=datetime.now(timezone.utc).date(),
+            help="Leave blank if not applicable.",
+        )
+
+    if category in _WARRANTY_CATS:
+        st.divider()
+        st.caption("💰 Asset fields")
+        col_v, col_w = st.columns(2)
+        with col_v:
+            estimated_value = st.number_input(
+                "Estimated Value (£)", min_value=0.0, step=1.0, value=0.0,
+                help="Used for insurance ledger calculations."
+            )
+            if estimated_value == 0.0:
+                estimated_value = None
+        with col_w:
+            warranty_until = st.date_input(
+                "Warranty Until",
+                value=None,
+                min_value=datetime.now(timezone.utc).date(),
+            )
+
+    description = st.text_area("Description / Notes", placeholder="Optional…", height=80)
 
     st.divider()
     col_save, col_cancel = st.columns(2)
@@ -519,14 +606,18 @@ def dialog_add_item() -> None:
             try:
                 _set_postgrest_auth()
                 supabase.table("inventory").insert({
-                    "user_id":     st.session_state["user_id"],
-                    "item_name":   item_name.strip(),
-                    "quantity":    float(quantity),
-                    "custom_unit": custom_unit.strip() or None,
-                    "description": description.strip() or None,
-                    "location_id": location_id,
+                    "user_id":          st.session_state["user_id"],
+                    "item_name":        item_name.strip(),
+                    "category":         category,
+                    "quantity":         float(quantity),
+                    "custom_unit":      custom_unit.strip() or None,
+                    "description":      description.strip() or None,
+                    "location_id":      location_id,
+                    "expiry_date":      expiry_date.isoformat() if expiry_date else None,
+                    "estimated_value":  estimated_value,
+                    "warranty_until":   warranty_until.isoformat() if warranty_until else None,
                 }).execute()
-                st.toast("✅ Item added successfully!", icon="📦")
+                st.toast("✅ Item added!", icon="📦")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Failed to add item: {exc}")
@@ -546,33 +637,80 @@ def dialog_edit_item(row: dict) -> None:
         for _, r in locs_df.iterrows():
             loc_options[f"{r['icon']} {r['name']}"] = r["id"]
 
-    # Find the currently assigned location label
     current_loc_id    = row.get("location_id")
     loc_id_to_label   = {v: k for k, v in loc_options.items()}
     current_loc_label = loc_id_to_label.get(current_loc_id, "— None —")
     loc_keys          = list(loc_options.keys())
     loc_index         = loc_keys.index(current_loc_label) if current_loc_label in loc_keys else 0
 
+    current_cat = row.get("category") or _CATEGORIES[0]
+    cat_index   = _CATEGORIES.index(current_cat) if current_cat in _CATEGORIES else 0
+
     col_a, col_b = st.columns(2)
     with col_a:
         item_name = st.text_input("Item Name *", value=row.get("item_name", ""))
     with col_b:
+        category = st.selectbox("Category *", options=_CATEGORIES, index=cat_index)
+
+    col_c, col_d = st.columns(2)
+    with col_c:
         quantity = st.number_input(
             "Quantity *", min_value=0.0, step=1.0,
             value=float(row.get("quantity", 0)),
         )
-
-    col_c, col_d = st.columns(2)
-    with col_c:
-        custom_unit = st.text_input("Unit", value=row.get("custom_unit") or "")
     with col_d:
+        custom_unit = st.text_input("Unit", value=row.get("custom_unit") or "")
+
+    col_e, col_f = st.columns(2)
+    with col_e:
         loc_label   = st.selectbox("Location", options=loc_keys, index=loc_index)
         location_id = loc_options[loc_label]
+    with col_f:
+        st.empty()
+
+    # ── Conditional fields ────────────────────────────────────────────────
+    expiry_date     = None
+    estimated_value = None
+    warranty_until  = None
+
+    if category in _EXPIRY_CATS:
+        st.divider()
+        st.caption("🗓️ Perishable fields")
+        existing_expiry = row.get("expiry_date")
+        if isinstance(existing_expiry, str):
+            try:
+                existing_expiry = datetime.fromisoformat(existing_expiry).date()
+            except Exception:
+                existing_expiry = None
+        elif hasattr(existing_expiry, "date"):
+            existing_expiry = existing_expiry.date()
+        expiry_date = st.date_input("Expiry Date", value=existing_expiry)
+
+    if category in _WARRANTY_CATS:
+        st.divider()
+        st.caption("💰 Asset fields")
+        existing_warranty = row.get("warranty_until")
+        if isinstance(existing_warranty, str):
+            try:
+                existing_warranty = datetime.fromisoformat(existing_warranty).date()
+            except Exception:
+                existing_warranty = None
+        elif hasattr(existing_warranty, "date"):
+            existing_warranty = existing_warranty.date()
+
+        col_v, col_w = st.columns(2)
+        with col_v:
+            estimated_value = st.number_input(
+                "Estimated Value (£)", min_value=0.0, step=1.0,
+                value=float(row.get("estimated_value") or 0.0),
+            )
+            if estimated_value == 0.0:
+                estimated_value = None
+        with col_w:
+            warranty_until = st.date_input("Warranty Until", value=existing_warranty)
 
     description = st.text_area(
-        "Description / Notes",
-        value=row.get("description") or "",
-        height=100,
+        "Description / Notes", value=row.get("description") or "", height=80
     )
 
     st.divider()
@@ -586,12 +724,16 @@ def dialog_edit_item(row: dict) -> None:
             try:
                 _set_postgrest_auth()
                 supabase.table("inventory").update({
-                    "item_name":   item_name.strip(),
-                    "quantity":    float(quantity),
-                    "custom_unit": custom_unit.strip() or None,
-                    "description": description.strip() or None,
-                    "location_id": location_id,
-                    "updated_at":  datetime.now(timezone.utc).isoformat(),
+                    "item_name":        item_name.strip(),
+                    "category":         category,
+                    "quantity":         float(quantity),
+                    "custom_unit":      custom_unit.strip() or None,
+                    "description":      description.strip() or None,
+                    "location_id":      location_id,
+                    "expiry_date":      expiry_date.isoformat() if expiry_date else None,
+                    "estimated_value":  estimated_value,
+                    "warranty_until":   warranty_until.isoformat() if warranty_until else None,
+                    "updated_at":       datetime.now(timezone.utc).isoformat(),
                 }).eq("id", row["id"]).execute()
                 st.toast("✅ Item updated!", icon="✏️")
                 st.rerun()
@@ -601,6 +743,7 @@ def dialog_edit_item(row: dict) -> None:
     with col_cancel:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
+
 
 
 @st.dialog("🗑️ Confirm Deletion")
@@ -635,7 +778,7 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 11.  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
-def render_sidebar() -> None:
+def render_sidebar(prefs: dict) -> None:
     with st.sidebar:
         st.markdown("## 📦 Inventory Manager")
         st.caption("Multi-tenant · Free Tier")
@@ -650,6 +793,57 @@ def render_sidebar() -> None:
 
         st.divider()
 
+        # ── Settings ──────────────────────────────────────────────────────
+        with st.expander("⚙️ Dashboard Settings", expanded=False):
+            layout: dict = prefs.get("dashboard_layout", {})
+
+            show_items = st.toggle(
+                "Total Distinct Items",
+                value=layout.get("show_total_items", True),
+                key="s_show_items",
+            )
+            show_qty = st.toggle(
+                "Total Aggregate Quantity",
+                value=layout.get("show_total_quantity", True),
+                key="s_show_qty",
+            )
+            show_low = st.toggle(
+                "Low Stock Alerts",
+                value=layout.get("show_low_stock", True),
+                key="s_show_low",
+            )
+
+            theme_options = ["system", "light", "dark"]
+            current_theme = prefs.get("theme", "system")
+            theme_index   = theme_options.index(current_theme) if current_theme in theme_options else 0
+            theme = st.selectbox(
+                "Theme", options=theme_options, index=theme_index, key="s_theme"
+            )
+
+            if st.button("💾 Save Settings", type="primary", use_container_width=True):
+                new_prefs = {
+                    "theme": theme,
+                    "dashboard_layout": {
+                        "show_total_items":    show_items,
+                        "show_total_quantity": show_qty,
+                        "show_low_stock":      show_low,
+                    },
+                }
+                if upsert_preferences(new_prefs):
+                    st.toast("✅ Settings saved!", icon="💾")
+                    st.rerun()
+
+        st.divider()
+
+        with st.expander("👤 Account", expanded=False):
+            st.markdown("**Email:**")
+            st.code(email, language=None)
+            st.markdown("**User ID:**")
+            st.code(uid, language=None)
+            st.caption("Your UUID is the RLS isolation key at the database level.")
+
+        st.divider()
+
         if st.button("🚪 Sign Out", use_container_width=True, type="primary"):
             try:
                 supabase.auth.sign_out()
@@ -660,7 +854,6 @@ def render_sidebar() -> None:
 
         st.divider()
         st.caption("Built with Streamlit + Supabase")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
@@ -832,9 +1025,10 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 13.  DASHBOARD TAB
 # ─────────────────────────────────────────────────────────────────────────────
-def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
+def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame) -> None:
     layout: dict = prefs.get("dashboard_layout", {})
 
+    # ── KPI Metrics ───────────────────────────────────────────────────────
     st.subheader("📊 Key Metrics")
 
     total_items:    int   = len(df)
@@ -848,8 +1042,7 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
         active.append(("Total Aggregate Quantity", f"{total_quantity:,.1f}", None))
     if layout.get("show_low_stock", True):
         active.append((
-            "⚠️ Low Stock (qty < 5)",
-            low_stock,
+            "⚠️ Low Stock (qty < 5)", low_stock,
             "items need restocking" if low_stock else "All stocked",
         ))
 
@@ -867,14 +1060,128 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
         st.info("📭 Your inventory is empty — add items in the 📦 Inventory tab!")
         return
 
-    # Altair bar chart
+    # ── Expiry Radar ──────────────────────────────────────────────────────
+    st.subheader("🚨 Expiry Radar — Next 30 Days")
+    st.caption("Items from Consumables and Toiletries categories expiring soon.")
+
+    today     = pd.Timestamp.now(tz="UTC").normalize()
+    in_30     = today + pd.Timedelta(days=30)
+
+    if "expiry_date" in df.columns:
+        expiry_df = df[df["expiry_date"].notna()].copy()
+        expiry_df["expiry_date"] = pd.to_datetime(expiry_df["expiry_date"], utc=True, errors="coerce")
+        expiry_df = expiry_df[
+            (expiry_df["expiry_date"] >= today) &
+            (expiry_df["expiry_date"] <= in_30)
+        ].sort_values("expiry_date")
+    else:
+        expiry_df = pd.DataFrame()
+
+    if expiry_df.empty:
+        st.success("✅ Nothing expiring in the next 30 days.")
+    else:
+        st.warning(f"⚠️ {len(expiry_df)} item(s) expiring within 30 days.")
+
+        # Build location lookup
+        loc_lookup = (
+            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+
+        radar_display = expiry_df[
+            ["item_name", "category", "quantity", "custom_unit",
+             "expiry_date", "location_id"]
+        ].copy()
+        radar_display["Location"]    = radar_display["location_id"].map(loc_lookup).fillna("Unassigned")
+        radar_display["Days Left"]   = (
+            radar_display["expiry_date"] - today
+        ).dt.days
+        radar_display = radar_display.rename(columns={
+            "item_name":   "Item",
+            "category":    "Category",
+            "quantity":    "Qty",
+            "custom_unit": "Unit",
+            "expiry_date": "Expires On",
+        })[["Item", "Category", "Location", "Qty", "Unit", "Expires On", "Days Left"]]
+
+        st.dataframe(
+            radar_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Expires On":  st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+                "Days Left":   st.column_config.NumberColumn(format="%d days"),
+                "Qty":         st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+
+    st.divider()
+
+    # ── Insurance Ledger ──────────────────────────────────────────────────
+    st.subheader("🏦 Insurance Ledger — Asset Value by Location")
+    st.caption("Sum of estimated values for Electronics, Appliances, and Valuables.")
+
+    if "estimated_value" in df.columns:
+        asset_df = df[df["estimated_value"].notna() & (df["estimated_value"] > 0)].copy()
+    else:
+        asset_df = pd.DataFrame()
+
+    if asset_df.empty:
+        st.info("No asset values recorded yet. Add estimated values when logging Electronics, Appliances, or Valuables.")
+    else:
+        loc_lookup = (
+            {r["id"]: f"{r['icon']} {r['name']}" for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+        asset_df["Location"] = asset_df["location_id"].map(loc_lookup).fillna("📦 Unassigned")
+
+        ledger = (
+            asset_df.groupby("Location")["estimated_value"]
+            .sum()
+            .reset_index()
+            .rename(columns={"estimated_value": "Total Value (£)"})
+            .sort_values("Total Value (£)", ascending=False)
+        )
+
+        total_value = ledger["Total Value (£)"].sum()
+
+        # Top metric
+        st.metric("💷 Total Household Asset Value", f"£{total_value:,.2f}")
+
+        col_tbl, col_chart = st.columns([1, 1])
+        with col_tbl:
+            ledger_display = ledger.copy()
+            ledger_display["Total Value (£)"] = ledger_display["Total Value (£)"].apply(
+                lambda x: f"£{x:,.2f}"
+            )
+            st.dataframe(ledger_display, use_container_width=True, hide_index=True)
+
+        with col_chart:
+            fig = px.bar(
+                ledger,
+                x="Location",
+                y="Total Value (£)",
+                color="Location",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                text_auto=".2s",
+            )
+            fig.update_layout(
+                showlegend=False,
+                height=300,
+                margin=dict(t=20, b=10, l=10, r=10),
+                xaxis_title=None,
+            )
+            fig.update_traces(textposition="outside")
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Altair bar chart ──────────────────────────────────────────────────
     st.subheader("📊 Quantity by Item")
-    st.caption("Click a bar to highlight it.")
 
-    chart_df = df[["item_name", "quantity"]].copy()
-    chart_df.columns = ["Item", "Quantity"]
-
-    selection = alt.selection_point(fields=["Item"])
+    chart_df          = df[["item_name", "quantity"]].copy()
+    chart_df.columns  = ["Item", "Quantity"]
+    selection         = alt.selection_point(fields=["Item"])
 
     bar = (
         alt.Chart(chart_df)
@@ -882,62 +1189,22 @@ def render_dashboard(df: pd.DataFrame, prefs: dict) -> None:
         .encode(
             x=alt.X("Item:N", sort="-y", axis=alt.Axis(labelAngle=-30, labelLimit=120)),
             y=alt.Y("Quantity:Q"),
-            color=alt.condition(
-                selection,
-                alt.value("#4A90D9"),
-                alt.value("#b8d4f0"),
-            ),
+            color=alt.condition(selection, alt.value("#4A90D9"), alt.value("#b8d4f0")),
             tooltip=[
                 alt.Tooltip("Item:N",     title="Item"),
                 alt.Tooltip("Quantity:Q", title="Qty", format=".2f"),
             ],
         )
         .add_params(selection)
-        .properties(height=380)
+        .properties(height=350)
     )
 
     chart_event = st.altair_chart(
-        bar,
-        theme="streamlit",
-        use_container_width=True,
-        on_select="rerun",
-        key="altair_bar_chart",
+        bar, theme="streamlit", use_container_width=True,
+        on_select="rerun", key="altair_bar_chart",
     )
-
     if chart_event:
         st.session_state["chart_selection"] = getattr(chart_event, "selection", None)
-
-    # Plotly donut
-    st.subheader("🍩 Inventory Distribution by Unit")
-
-    unit_df = df[["custom_unit", "quantity"]].copy()
-    unit_df["custom_unit"] = unit_df["custom_unit"].fillna("Unspecified")
-    unit_summary = (
-        unit_df.groupby("custom_unit")["quantity"]
-        .sum()
-        .reset_index()
-        .rename(columns={"custom_unit": "Unit", "quantity": "Total Quantity"})
-    )
-
-    if unit_summary["Total Quantity"].sum() > 0:
-        fig = px.pie(
-            unit_summary,
-            names="Unit",
-            values="Total Quantity",
-            hole=0.4,
-            title="Total Quantity by Unit Type",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        fig.update_traces(
-            textposition="inside",
-            textinfo="percent+label",
-            hovertemplate="<b>%{label}</b><br>Quantity: %{value:,.2f}<br>Share: %{percent}",
-        )
-        fig.update_layout(margin=dict(t=60, b=10, l=10, r=10), height=420)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Add items with units assigned to see this chart.")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 14.  INVENTORY TAB
@@ -1077,35 +1344,31 @@ def render_settings(prefs: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def render_main_app() -> None:
     """
-    Single-pass data fetch: exactly 3 Supabase round-trips per full rerun.
-        1. fetch_inventory()   → inventory table
-        2. fetch_preferences() → user_preferences table
-        3. fetch_locations()   → locations table
-    All results passed as arguments — no N+1 queries inside tab renderers.
+    3 Supabase round-trips per full rerun:
+        1. fetch_inventory()
+        2. fetch_preferences()
+        3. fetch_locations()
+    All results passed as arguments — no N+1 queries inside renderers.
     """
-    render_sidebar()
-
     with st.spinner("Loading your data…"):
         df:           pd.DataFrame = fetch_inventory()
         prefs:        dict         = fetch_preferences()
         locations_df: pd.DataFrame = fetch_locations()
 
-    tab_home, tab_dash, tab_inv, tab_settings = st.tabs(
-        ["🏠 Home", "📊 Dashboard", "📦 Inventory", "⚙️ Settings"]
+    render_sidebar(prefs)   # Settings now live here
+
+    tab_locations, tab_inventory, tab_dashboard = st.tabs(
+        ["🏠 Locations", "📦 Inventory", "📊 Dashboard"]
     )
 
-    with tab_home:
+    with tab_locations:
         render_home_tab(df, locations_df)
 
-    with tab_dash:
-        render_dashboard(df, prefs)
-
-    with tab_inv:
+    with tab_inventory:
         render_inventory(df)
 
-    with tab_settings:
-        render_settings(prefs)
-
+    with tab_dashboard:
+        render_dashboard(df, prefs, locations_df)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 17.  ENTRY POINT  —  Security Gate
