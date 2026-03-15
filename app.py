@@ -134,6 +134,7 @@ def _init_supabase_client() -> Client:
 
 supabase: Client = _init_supabase_client()
 
+CARDS_PER_ROW: int = 3   # ← ADD THIS LINE HERE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  SESSION STATE BOOTSTRAP
@@ -1199,7 +1200,6 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
 # ─────────────────────────────────────────────────────────────────────────────
 # 12.  HOME TAB  —  Location Card Grid
 # ─────────────────────────────────────────────────────────────────────────────
-CARDS_PER_ROW = 3
 
 def _location_card(col, loc: dict, loc_items: pd.DataFrame, loc_units: pd.DataFrame) -> None:
     with col:
@@ -1943,10 +1943,10 @@ def render_dashboard(df: pd.DataFrame, prefs: dict, locations_df: pd.DataFrame, 
     st.markdown("**Financial Overview**")
     sunk_cost = asset_value = 0.0
     if not df.empty:
-        cons = df[df["category"].isin(EXPIRY_CATS)].copy()
+        cons = df[df["category"].isin(_EXPIRY_CATS)].copy()
         cons["unit_cost"] = pd.to_numeric(cons.get("unit_cost", pd.Series(dtype=float)), errors="coerce").fillna(0)
         sunk_cost   = float((cons["quantity"] * cons["unit_cost"]).sum())
-        durable     = df[df["category"].isin(DURABLE_CATS)].copy()
+        durable     = df[df["category"].isin(_DURABLE_CATS)].copy()
         asset_value = float(pd.to_numeric(durable.get("estimated_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
 
     cf1, cf2 = st.columns(2)
