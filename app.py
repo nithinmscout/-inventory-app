@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import html as html
@@ -197,7 +197,7 @@ def render_auth_page() -> None:
     _, centre, _ = st.columns([1, 2, 1])
     with centre:
         st.markdown("## 📦 Inventory Manager")
-        st.caption("Multi-tenant · Free Tier · Powered by Supabase + Streamlit")
+        st.caption("Track and manage your home inventory with ease. Sign in or create an account to get started.")
         st.divider()
 
         tab_login, tab_register = st.tabs(["🔑 Sign In", "📝 Create Account"])
@@ -281,8 +281,9 @@ def fetch_inventory() -> pd.DataFrame:
             .select(
                 "id, item_name, category, quantity, custom_unit, description, "
                 "expiry_date, estimated_value, warranty_until, unit_cost, "
-                "min_threshold, location_id, unit_id, created_at, updated_at"
+                "min_threshold, location_id, unit_id, is_archived, created_at, updated_at"
             )
+            .eq("is_archived", False)          # ← globally hides archived items
             .order("created_at", desc=True)
             .range(0, 9999)
             .execute()
@@ -292,14 +293,13 @@ def fetch_inventory() -> pd.DataFrame:
             for col in ["quantity", "estimated_value", "unit_cost"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
             df["min_threshold"] = pd.to_numeric(df["min_threshold"], errors="coerce")
-            # Leave min_threshold as NaN when unset — procurement filters on .notna()
             df["expiry_date"]    = pd.to_datetime(df["expiry_date"],   errors="coerce")
             df["warranty_until"] = pd.to_datetime(df["warranty_until"], errors="coerce")
             return df
         return pd.DataFrame(columns=[
             "id", "item_name", "category", "quantity", "custom_unit", "description",
             "expiry_date", "estimated_value", "warranty_until", "unit_cost",
-            "min_threshold", "location_id", "unit_id", "created_at", "updated_at",
+            "min_threshold", "location_id", "unit_id", "is_archived", "created_at", "updated_at",
         ])
     except Exception as exc:
         st.error(f"Failed to load inventory: {exc}")
@@ -435,6 +435,29 @@ def fetch_maintenance_tasks() -> pd.DataFrame:
         ])
     except Exception as exc:
         st.error(f"Failed to load maintenance tasks: {exc}")
+        return pd.DataFrame()
+
+def fetch_meal_plans() -> pd.DataFrame:
+    """Returns all meal-plan rows for the authenticated user."""
+    try:
+        _set_postgrest_auth()
+        resp = (
+            supabase.table("meal_plan")
+            .select("id, user_id, plan_date, meal_type, recipe_name, inventory_ids, created_at")
+            .order("plan_date", desc=False)
+            .range(0, 9999)
+            .execute()
+        )
+        if resp.data:
+            df = pd.DataFrame(resp.data)
+            df["plan_date"] = pd.to_datetime(df["plan_date"], errors="coerce")
+            return df
+        return pd.DataFrame(columns=[
+            "id", "user_id", "plan_date", "meal_type",
+            "recipe_name", "inventory_ids", "created_at",
+        ])
+    except Exception as exc:
+        st.error(f"Failed to load meal plans: {exc}")
         return pd.DataFrame()
 
 
@@ -1040,11 +1063,12 @@ def dialog_edit_item(row: dict) -> None:
             st.rerun()
 
 
-@st.dialog("🗑️ Confirm Deletion")
+@st.dialog("🗂️ Confirm Archive")
 def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
+    """Soft-archive: sets is_archived=True instead of deleting."""
     st.warning(
-        f"You are about to **permanently delete {len(ids)} item(s)**. "
-        "This cannot be undone."
+        f"Archive **{len(ids)} item(s)**? They will be hidden from your inventory "
+        "but **not permanently deleted**. You can restore them via the database."
     )
     for name in names[:10]:
         st.markdown(f"- `{name}`")
@@ -1052,18 +1076,18 @@ def dialog_confirm_delete(ids: list[str], names: list[str]) -> None:
         st.markdown(f"_…and {len(names) - 10} more._")
 
     st.divider()
-    col_del, col_cancel = st.columns(2)
-
-    with col_del:
-        if st.button("🗑️ Yes, Delete", type="primary", use_container_width=True):
+    col_arch, col_cancel = st.columns(2)
+    with col_arch:
+        if st.button("🗂️ Yes, Archive", type="primary", use_container_width=True):
             try:
                 _set_postgrest_auth()
-                supabase.table("inventory").delete().in_("id", ids).execute()
-                st.toast(f"🗑️ Deleted {len(ids)} item(s).", icon="✅")
+                supabase.table("inventory").update(
+                    {"is_archived": True}
+                ).in_("id", ids).execute()
+                st.toast(f"🗂️ Archived {len(ids)} item(s).", icon="✅")
                 st.rerun()
             except Exception as exc:
-                st.error(f"Deletion failed: {exc}")
-
+                st.error(f"Archive failed: {exc}")
     with col_cancel:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
@@ -1195,7 +1219,7 @@ def render_sidebar(prefs: dict, df: pd.DataFrame, locations_df: pd.DataFrame, un
                 _clear_session()
                 st.rerun()
 
-        st.caption("Built with Streamlit · Supabase")
+        st.caption("Built for Vetti boys")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1483,6 +1507,50 @@ def render_home_tab(df: pd.DataFrame, locations_df: pd.DataFrame, units_df: pd.D
             )
             _location_card(col, loc, loc_items, loc_units)
         st.write("")
+
+    # ── Storage Units Grid ───────────────────────────────────────────────────
+    if not units_df.empty:
+        st.divider()
+        st.subheader("Storage Units")
+
+        loc_label_lookup = (
+            {r["id"]: f"{r.get('icon', '📦')} {r['name']}"
+             for r in locations_df.to_dict("records")}
+            if not locations_df.empty else {}
+        )
+
+        units_list  = units_df.to_dict("records")
+        UNITS_PER_ROW = 4
+        for u_start in range(0, len(units_list), UNITS_PER_ROW):
+            u_chunk = units_list[u_start: u_start + UNITS_PER_ROW]
+            u_cols  = st.columns(UNITS_PER_ROW)
+            for u_col, unit in zip(u_cols, u_chunk):
+                uid        = unit.get("id")
+                u_icon     = unit.get("icon", "📦")
+                u_name     = unit.get("name", "Unit")
+                loc_label  = loc_label_lookup.get(unit.get("location_id"), "Unassigned")
+                item_count = (
+                    int((df["unit_id"] == uid).sum())
+                    if not df.empty and "unit_id" in df.columns else 0
+                )
+                with u_col:
+                    with st.container(border=True):
+                        st.markdown(
+                            f"""<div style="text-align:center;padding:14px 8px 10px 8px;">
+                              <p style="font-size:2rem;margin:0 0 4px 0">{_esc(u_icon)}</p>
+                              <p style="font-weight:700;font-size:1rem;margin:0 0 2px 0;
+                                         color:#0f172a">{_esc(u_name)}</p>
+                              <p style="color:#64748b;font-size:0.78rem;margin:0 0 8px 0">
+                                {_esc(loc_label)}</p>
+                              <p style="font-size:1.6rem;font-weight:800;
+                                         color:#14b8a6;margin:0">{item_count}</p>
+                              <p style="color:#94a3b8;font-size:0.68rem;text-transform:uppercase;
+                                         letter-spacing:.05em;margin:0">items</p>
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+            st.write("")
+
 
     # ── Spatial Overview — Digital Twin ──────────────────────────────────
     if not df.empty:
@@ -1860,13 +1928,63 @@ def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df
                 "min_threshold": "Min. Threshold",
             })
         )
-        st.dataframe(display_low, use_container_width=True, hide_index=True, column_config={
-            "Est. Budget": st.column_config.NumberColumn(format="£%.2f"),
-        })
+        # ── One-click restock editor ──────────────────────────────────────
+        low_editor_df = display_low.reset_index(drop=True).copy()
+        low_ref       = low.reset_index(drop=True).copy()    # id + Deficit anchor
+        low_editor_df.insert(0, "[ ] Bought", False)
+
+        edited = st.data_editor(
+            low_editor_df,
+            key="low_stock_editor",
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "[ ] Bought":    st.column_config.CheckboxColumn("Bought ✅", default=False),
+                "Est. Budget":   st.column_config.NumberColumn(format="£%.2f"),
+                "Item":          st.column_config.TextColumn(disabled=True),
+                "Category":      st.column_config.TextColumn(disabled=True),
+                "Location":      st.column_config.TextColumn(disabled=True),
+                "Current Qty":   st.column_config.NumberColumn(disabled=True),
+                "Min. Threshold":st.column_config.NumberColumn(disabled=True),
+                "Deficit":       st.column_config.NumberColumn(disabled=True),
+            },
+        )
+
+        # Process any checked rows immediately
+        bought_rows = edited[edited["[ ] Bought"] == True]
+        if not bought_rows.empty:
+            for editor_idx in bought_rows.index:
+                item_row   = low_ref.iloc[editor_idx]
+                item_id    = str(item_row["id"])
+                deficit    = float(item_row["Deficit"])
+                est_budget = float(item_row["Est. Budget"])
+                item_name  = item_row["item_name"]
+                category   = item_row.get("category", "Other")
+                try:
+                    _set_postgrest_auth()
+                    supabase.rpc("increment_inventory_quantity", {
+                        "p_inventory_id":   item_id,
+                        "p_quantity_delta": deficit,
+                        "p_new_unit_cost":  None,
+                    }).execute()
+                    supabase.table("shopping_history").insert({
+                        "user_id":          st.session_state["user_id"],
+                        "item_name":        item_name,
+                        "category":         category,
+                        "quantity_bought":  deficit,
+                        "total_price_paid": est_budget,
+                        "purchase_date":    datetime.now(timezone.utc).date().isoformat(),
+                        "inventory_id":     item_id,
+                    }).execute()
+                    st.toast(f"✅ Restocked {item_name} (+{deficit:.0f})", icon="🛒")
+                except Exception as exc:
+                    st.error(f"Restock failed for {item_name}: {exc}")
+            st.rerun()
+
         total_budget = low["Est. Budget"].sum()
         st.metric("Estimated Restock Budget", f"£{total_budget:,.2f}")
 
-        # ── Shopping List CSV Export ──────────────────────────────────────
         csv_bytes = display_low.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="📥 Download Shopping List (CSV)",
@@ -1875,6 +1993,7 @@ def render_procurement(df: pd.DataFrame, shopping_df: pd.DataFrame, locations_df
             mime="text/csv",
             use_container_width=True,
         )
+
     st.divider()
 
     # ── Section B: Spending Analytics ────────────────────────────────────
@@ -2452,8 +2571,11 @@ def render_inventory(df: pd.DataFrame) -> None:
     )
 
     if selected_ids:
-        st.markdown(f"**{len(selected_ids)} row(s) selected**")
-        col_edit, col_delete, col_spacer = st.columns([1, 1, 5])
+        st.markdown(f"**{len(selected_ids)} item(s) selected**")
+
+        # ── Row 1: Edit · Duplicate · Archive ────────────────────────────
+        col_edit, col_dup, col_arch, col_gap = st.columns([1, 1, 1, 4])
+
         with col_edit:
             edit_disabled = len(selected_ids) != 1
             if st.button(
@@ -2464,14 +2586,85 @@ def render_inventory(df: pd.DataFrame) -> None:
             ):
                 full_row = dict(df[df["id"] == selected_ids[0]].iloc[0].to_dict())
                 dialog_edit_item(full_row)
-        with col_delete:
-            if st.button("🗑️ Delete", type="primary", use_container_width=True):
+
+        with col_dup:
+            dup_disabled = len(selected_ids) != 1
+            if st.button(
+                "📋 Duplicate",
+                disabled=dup_disabled,
+                help="Select exactly 1 row to duplicate." if dup_disabled else None,
+                use_container_width=True,
+            ):
+                orig = dict(df[df["id"] == selected_ids[0]].iloc[0].to_dict())
+                orig.pop("id",         None)
+                orig.pop("created_at", None)
+                orig.pop("updated_at", None)
+                orig["item_name"] = str(orig.get("item_name", "")) + " (Copy)"
+                orig["user_id"]   = st.session_state["user_id"]
+                orig["is_archived"] = False
+                # Serialise date columns safely
+                for date_col in ("expiry_date", "warranty_until"):
+                    val = orig.get(date_col)
+                    if val is not None and pd.notna(val):
+                        try:
+                            orig[date_col] = pd.Timestamp(val).date().isoformat()
+                        except Exception:
+                            orig[date_col] = None
+                    else:
+                        orig[date_col] = None
+                try:
+                    _set_postgrest_auth()
+                    supabase.table("inventory").insert(orig).execute()
+                    st.toast(f"📋 Duplicated as '{orig['item_name']}'!", icon="✅")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Duplicate failed: {exc}")
+
+        with col_arch:
+            if st.button("🗂️ Archive", type="primary", use_container_width=True):
                 selected_names = view_df.loc[
                     view_df["id"].isin(selected_ids), "item_name"
                 ].tolist()
                 dialog_confirm_delete(selected_ids, selected_names)
+
+        # ── Row 2: Bulk Move ──────────────────────────────────────────────
+        st.markdown("**Bulk Move to Location:**")
+        locs_for_move = fetch_locations()
+        if not locs_for_move.empty:
+            move_options: dict = {"— Select destination —": None}
+            for _, _r in locs_for_move.iterrows():
+                move_options[f"{_r['icon']} {_r['name']}"] = _r["id"]
+
+            col_move_sel, col_move_btn = st.columns([3, 1])
+            with col_move_sel:
+                move_target = st.selectbox(
+                    "Move to",
+                    options=list(move_options.keys()),
+                    key="bulk_move_target",
+                    label_visibility="collapsed",
+                )
+            with col_move_btn:
+                if st.button("🚚 Apply Move", use_container_width=True):
+                    target_id = move_options[move_target]
+                    if target_id is None:
+                        st.warning("Please select a destination location.")
+                    else:
+                        try:
+                            _set_postgrest_auth()
+                            supabase.table("inventory").update({
+                                "location_id": target_id,
+                                "updated_at":  datetime.now(timezone.utc).isoformat(),
+                            }).in_("id", selected_ids).execute()
+                            st.toast(
+                                f"🚚 Moved {len(selected_ids)} item(s) to "
+                                f"{move_target}!", icon="✅"
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Bulk move failed: {exc}")
     else:
-        st.caption("Select items above to edit or delete them.")
+        st.caption("Select items above to edit, duplicate, archive, or bulk-move them.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 15.  SETTINGS TAB
@@ -2523,6 +2716,164 @@ def render_settings(prefs: dict) -> None:
             "via Row Level Security at the database level."
         )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MEAL PLANNER — Dialog
+# ─────────────────────────────────────────────────────────────────────────────
+@st.dialog("🍽️ Add Meal", width="large")
+def dialog_add_meal(plan_date, df: pd.DataFrame) -> None:
+    from datetime import date as _date
+    st.caption(
+        f"Planning for **{plan_date.strftime('%A, %d %b %Y') if hasattr(plan_date,'strftime') else plan_date}**"
+    )
+    meal_type   = st.selectbox("Meal Type", ["Breakfast", "Lunch", "Dinner", "Snack"])
+    recipe_name = st.text_input("Recipe Name *", placeholder="e.g. Chicken Stir Fry")
+
+    ingredient_opts = sorted(df["item_name"].unique().tolist()) if not df.empty else []
+    linked = st.multiselect(
+        "Link Ingredients (optional)",
+        options=ingredient_opts,
+        help="Tag which inventory items this recipe consumes.",
+    )
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Meal", type="primary", use_container_width=True):
+            if not recipe_name.strip():
+                st.error("Recipe Name is required.")
+                return
+            inv_ids: list[str] = []
+            if linked and not df.empty:
+                inv_ids = df[df["item_name"].isin(linked)]["id"].astype(str).tolist()
+            try:
+                _set_postgrest_auth()
+                plan_date_str = (
+                    plan_date.isoformat()
+                    if hasattr(plan_date, "isoformat") else str(plan_date)
+                )
+                supabase.table("meal_plan").insert({
+                    "user_id":       st.session_state["user_id"],
+                    "plan_date":     plan_date_str,
+                    "meal_type":     meal_type,
+                    "recipe_name":   recipe_name.strip(),
+                    "inventory_ids": inv_ids,
+                }).execute()
+                st.toast(f"🍽️ {meal_type} '{recipe_name.strip()}' added!", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to save meal plan: {exc}")
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MEAL PLANNER — Page Renderer
+# ─────────────────────────────────────────────────────────────────────────────
+def render_meal_planner(df: pd.DataFrame, meal_df: pd.DataFrame) -> None:
+    st.markdown(
+        "<h1 style='font-size:2.4rem;font-weight:800;margin:0 0 4px 0'>"
+        "🍽️ Meal & Menu Planner</h1>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    col_cal, col_radar = st.columns([3, 1])
+
+    # ── Right column: Expiry Radar ────────────────────────────────────────
+    with col_radar:
+        st.subheader("⏰ Expiry Radar")
+        today_ts = pd.Timestamp.now(tz="UTC").normalize()
+        if not df.empty and "expiry_date" in df.columns:
+            consumables = df[df["category"] == "Consumables"].copy()
+            consumables["expiry_date"] = pd.to_datetime(
+                consumables["expiry_date"], utc=True, errors="coerce"
+            )
+            consumables = (
+                consumables[consumables["expiry_date"].notna()]
+                .sort_values("expiry_date")
+            )
+            if consumables.empty:
+                st.info("No consumables with expiry dates.")
+            else:
+                consumables["Days Left"] = (
+                    consumables["expiry_date"] - today_ts
+                ).dt.days
+                exp_display = (
+                    consumables[["item_name", "expiry_date", "quantity", "Days Left"]]
+                    .rename(columns={
+                        "item_name":   "Item",
+                        "expiry_date": "Expires",
+                        "quantity":    "Qty",
+                    })
+                )
+                st.dataframe(
+                    exp_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Expires":   st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
+                        "Days Left": st.column_config.NumberColumn(format="%d d"),
+                    },
+                )
+        else:
+            st.info("No consumable items found.")
+
+    # ── Left column: 7-day calendar ───────────────────────────────────────
+    with col_cal:
+        st.subheader("📅 Weekly Meal Plan")
+
+        today_date = datetime.now(timezone.utc).date()
+
+        # Build lookup: date_str → list of meal rows
+        meals_by_date: dict[str, list] = {}
+        if not meal_df.empty:
+            for _, mrow in meal_df.iterrows():
+                d_key = str(mrow["plan_date"])[:10]
+                meals_by_date.setdefault(d_key, []).append(mrow)
+
+        MEAL_ICONS = {"Breakfast": "🌅", "Lunch": "☀️", "Dinner": "🌙", "Snack": "🍎"}
+        day_cols = st.columns(7)
+
+        for i, day_col in enumerate(day_cols):
+            day     = today_date + timedelta(days=i)
+            day_str = day.isoformat()
+            day_meals = meals_by_date.get(day_str, [])
+            is_today  = (i == 0)
+            hdr_bg    = "#14b8a6" if is_today else "#334155"
+
+            with day_col:
+                st.markdown(
+                    f"""<div style="background:{hdr_bg};border-radius:10px 10px 0 0;
+                                   padding:10px 6px 8px 6px;text-align:center;
+                                   margin-bottom:0">
+                      <p style="font-weight:800;color:#f1f5f9;margin:0;font-size:0.88rem">
+                        {day.strftime('%a')}</p>
+                      <p style="color:#cbd5e1;margin:0;font-size:0.75rem">
+                        {day.strftime('%d %b')}</p>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                with st.container(border=True):
+                    if day_meals:
+                        for meal in day_meals:
+                            m_icon = MEAL_ICONS.get(meal.get("meal_type", ""), "🍽️")
+                            st.markdown(
+                                f"<small>{m_icon} **{_esc(meal.get('meal_type',''))}**"
+                                f"<br>{_esc(str(meal.get('recipe_name', '')))}</small>",
+                                unsafe_allow_html=True,
+                            )
+                            st.write("")
+                    else:
+                        st.caption("—")
+
+                    if st.button(
+                        "➕",
+                        key=f"add_meal_{day_str}",
+                        help=f"Add meal for {day.strftime('%d %b')}",
+                        use_container_width=True,
+                    ):
+                        dialog_add_meal(day, df)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 16.  MAIN APPLICATION SHELL
@@ -2537,6 +2888,7 @@ def render_main_app() -> None:
         units_df:       pd.DataFrame = fetch_units()
         shopping_df:    pd.DataFrame = fetch_shopping_history()
         maintenance_df: pd.DataFrame = fetch_maintenance_tasks()
+        meal_df:        pd.DataFrame = fetch_meal_plans()  
 
     # ── Page closures capture the fetched data ────────────────────────────
     def _page_home():
@@ -2553,6 +2905,10 @@ def render_main_app() -> None:
 
     def _page_maintenance():
         render_maintenance(maintenance_df, df)
+    
+    def _page_meal_planner():
+        render_meal_planner(df, meal_df)
+
 
     # ── Register st.navigation pages ──────────────────────────────────────
     pg = st.navigation(
@@ -2562,6 +2918,7 @@ def render_main_app() -> None:
             st.Page(_page_dashboard,   title="Dashboard",   icon="📊"),
             st.Page(_page_procurement, title="Procurement", icon="🛒"),
             st.Page(_page_maintenance, title="Maintenance", icon="🔧"),
+            st.Page(_page_meal_planner,  title="Meal Planner",  icon="🍽️"),
         ],
         position="sidebar",
     )
